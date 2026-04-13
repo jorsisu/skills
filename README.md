@@ -10,7 +10,9 @@ Point your AI assistant to a skill folder. The assistant reads `SKILL.md` and fo
 
 | Skill | Description |
 |-------|-------------|
-| [sitecore-search-react](./sitecore-search-react/) | Sitecore Search SDK integration patterns for React |
+| [figma-bridge](./figma-bridge/) | Automates Figma → Code workflow using MCP. Extracts design data, maps to project tokens, suggests implementation |
+| [generate-pr-message](./generate-pr-message/) | Draft a concise markdown PR title and body from the current branch commit history |
+| [sitecore-search-react](./sitecore-search-react/) | Sitecore Search SDK integration patterns for React with facets, URL sync, and SearchUrlManager |
 
 ## Adding a New Skill
 
