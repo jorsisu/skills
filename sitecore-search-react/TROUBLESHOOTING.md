@@ -1,495 +1,188 @@
 # Troubleshooting Guide
 
-Issue → Solution mappings for common Sitecore Search problems.
+Issue -> solution mappings for common Sitecore Search problems.
+
+## Table of Contents
+
+- [Quick Diagnosis](#quick-diagnosis)
+- [Issue #1: Back Button Doesn't Work](#issue-1-back-button-doesnt-work)
+- [Issue #2: No Results Appearing](#issue-2-no-results-appearing)
+- [Issue #3: "Search configuration missing" Error](#issue-3-search-configuration-missing-error)
+- [Issue #4: Widget Not Rendering](#issue-4-widget-not-rendering)
+- [Issue #5: TypeScript Errors](#issue-5-typescript-errors)
+- [Issue #7: API Returns Hits But UI Shows No Results Or Too Few](#issue-7-api-returns-hits-but-ui-shows-no-results-or-too-few)
+- [Issue #8: Facet Counts Don't Match Visible Results](#issue-8-facet-counts-dont-match-visible-results)
+- [Debugging Tools](#debugging-tools)
 
 ## Quick Diagnosis
 
-**Facets not working?** → Check #1-2 below
-**URL not updating?** → Check #3-4 below
-**Back button broken?** → Check #5 below
-**No results?** → Check #6-7 below
+- **Facets not working?** -> See `ANTI-PATTERNS.md` #1-2
+- **URL not updating?** -> See `ANTI-PATTERNS.md` #3, #8
+- **Back button broken?** -> #1 below
+- **No results?** -> #2-3 below, or #7 if payload has hits
+- **Widget not rendering?** -> #4 below
+- **TypeScript errors?** -> #5 below
+- **Clear filters incomplete?** -> See `ANTI-PATTERNS.md` #9
+- **Page doesn't reset after search?** -> See `ANTI-PATTERNS.md` #7
+- **Load More shows with few/no visible results?** -> #7 below
+- **Facet counts don't match visible results?** -> #8 below
 
 ---
 
-## Issue #1: Facets Don't Filter Results
+## Issue #1: Back Button Doesn't Work
 
-### Symptoms
-- Clicking facets doesn't filter results
-- Results stay the same regardless of selection
-- No errors in console
+**Symptoms:** Browser back/forward doesn't restore previous search. URL changes but results don't.
 
-### Diagnosis
+**Solution:** Add sync effect listening to `searchParams` from `next/navigation`:
 ```typescript
-// Check 1: Using .id or .text?
-console.log('Facet value:', facetValue.id); // Should see: "news", "events"
-console.log('Facet value:', facetValue.text); // Should see: "News", "Events"
+import { useSearchParams } from 'next/navigation';
 
-// Check 2: What's being passed?
-actions.onFacetClick({
-  facetValueId: facetValue.id  // Is this .id or .text?
-});
-```
+const searchParams = useSearchParams();
 
-### Solutions
-
-**Solution 1: Using .text instead of .id** (90% of cases)
-```typescript
-// ❌ WRONG
-facetValueId: facetValue.text
-
-// ✅ FIX
-facetValueId: facetValue.id
-```
-
-**Solution 2: Missing required parameters**
-```typescript
-// ❌ WRONG
-actions.onFacetClick({ facetId, facetValueId, checked });
-
-// ✅ FIX
-actions.onFacetClick({
-  facetId,
-  facetValueId,
-  type: 'valueId',  // Add this
-  checked,
-  facetIndex: 0,    // Add this
-});
-```
-
-**Solution 3: Missing URL sync**
-```typescript
-// ❌ WRONG - Only updates SDK
-actions.onFacetClick({ ... });
-
-// ✅ FIX - Update both SDK and URL
-actions.onFacetClick({ ... });
-if (router.isReady) {
-  await searchUrlManager.addFacet(router, facetId, valueId);
-}
-```
-
----
-
-## Issue #2: Missing Required onFacetClick Parameters
-
-### Symptoms
-- Facet clicks don't work
-- No console errors
-- SDK silently ignores facet updates
-
-### Diagnosis
-```typescript
-// Check: Count parameters
-actions.onFacetClick({
-  facetId,         // 1
-  facetValueId,    // 2
-  type,            // 3 - Missing?
-  checked,         // 4
-  facetIndex,      // 5 - Missing?
-});
-```
-
-### Solution
-```typescript
-// Add ALL 5 required parameters
-const facetIndex = queryResult.data?.facet?.findIndex(f => f.name === facetId) || 0;
-
-actions.onFacetClick({
-  facetId: 'category',
-  facetValueId: facetValue.id,
-  type: 'valueId',           // REQUIRED
-  checked: true,
-  facetIndex,                // REQUIRED
-});
-```
-
----
-
-## Issue #3: URL Doesn't Update
-
-### Symptoms
-- Search/facets work but URL stays same
-- Can't share links
-- Back button doesn't work
-- Page refresh loses state
-
-### Diagnosis
-```typescript
-// Check 1: Router ready?
-console.log('Router ready:', router.isReady);  // Must be true
-
-// Check 2: SearchUrlManager called?
-const handleSearch = async (term) => {
-  actions.onKeyphraseChange({ keyphrase: term });
-  // Is there a searchUrlManager call here?
-};
-
-// Check 3: Shallow routing enabled?
-router.push({ ... }, undefined, { shallow: true }); // Must have shallow: true
-```
-
-### Solutions
-
-**Solution 1: Router not ready**
-```typescript
-// ❌ WRONG
-await searchUrlManager.setSearchTerm(router, term);
-
-// ✅ FIX
-if (router.isReady) {
-  await searchUrlManager.setSearchTerm(router, term);
-}
-```
-
-**Solution 2: Missing searchUrlManager call**
-```typescript
-// ❌ WRONG - Only SDK update
-actions.onKeyphraseChange({ keyphrase: term });
-
-// ✅ FIX - Update both
-actions.onKeyphraseChange({ keyphrase: term });
-if (router.isReady) {
-  await searchUrlManager.setSearchTerm(router, term);
-}
-```
-
-**Solution 3: Missing shallow routing**
-```typescript
-// ❌ WRONG - Full page reload
-router.push({ pathname, query });
-
-// ✅ FIX - Shallow routing
-router.push({ pathname, query }, undefined, { shallow: true });
-```
-
----
-
-## Issue #4: router.query is Empty
-
-### Symptoms
-- `router.query` returns `{}`
-- URL parsing fails
-- Can't read search term from URL
-
-### Diagnosis
-```typescript
-// Check: isReady flag
-console.log('Router ready:', router.isReady);
-console.log('Router query:', router.query);
-```
-
-### Solution
-```typescript
-// ❌ WRONG - Access query immediately
-const searchTerm = router.query.q;
-
-// ✅ FIX - Check isReady first
 useEffect(() => {
-  if (!router.isReady) return;
-
-  const searchTerm = router.query.q;
-  // Now safe to use
-}, [router.isReady]);
+  searchUrlManager.syncFromUrl(searchParams);
+}, [searchParams]);
 ```
+
+`searchParams` is a reactive value in App Router — it updates automatically on back/forward navigation.
 
 ---
 
-## Issue #5: Back Button Doesn't Work
+## Issue #2: No Results Appearing
 
-### Symptoms
-- Browser back button doesn't restore previous search
-- Forward button doesn't work
-- URL changes but results don't
+**Symptoms:** Widget renders but results empty. No console errors.
 
-### Diagnosis
+**Diagnosis:**
 ```typescript
-// Check: Syncing on URL change?
-useEffect(() => {
-  // Is there searchUrlManager.syncFromUrl() here?
-}, [router.query]);
-```
-
-### Solution
-```typescript
-// Add sync effect
-useEffect(() => {
-  if (!router.isReady) return;
-
-  searchUrlManager.syncFromUrl(router);
-}, [router.query, router.isReady]);
-```
-
----
-
-## Issue #6: No Results Appearing
-
-### Symptoms
-- Widget renders but no results
-- No errors in console
-- Search seems to work but results empty
-
-### Diagnosis
-```typescript
-// Check 1: API credentials
 console.log('Customer key:', process.env.NEXT_PUBLIC_SEARCH_CUSTOMER_KEY);
 console.log('API key exists:', !!process.env.NEXT_PUBLIC_SEARCH_API_KEY);
-
-// Check 2: Results data
 console.log('Query result:', queryResult.data);
-console.log('Content:', queryResult.data?.content);
-console.log('Total:', queryResult.data?.total_item);
-
-// Check 3: Network tab
-// Look for API calls to Sitecore Search
-// Check response status (should be 200)
 ```
 
-### Solutions
-
-**Solution 1: Missing environment variables**
-```bash
-# Check .env.local exists
-ls -la .env.local
-
-# Verify all 3 variables set
-cat .env.local | grep SEARCH
-
-# Restart dev server
-npm run dev
-```
-
-**Solution 2: Content not indexed**
-- Go to Sitecore Search dashboard
-- Check content is indexed
-- Verify search source is configured
-- Trigger re-index if needed
-
-**Solution 3: SearchProvider not wrapping app**
-```typescript
-// Check _app.tsx has SearchProvider
-export default function App({ Component, pageProps }: AppProps) {
-  return (
-    <SearchProvider>  {/* Must wrap here */}
-      <Component {...pageProps} />
-    </SearchProvider>
-  );
-}
-```
+**Solutions:**
+1. **Missing env vars** — check `.env.local` has all 3 variables, restart dev server
+2. **Content not indexed** — verify in Sitecore Search dashboard, trigger re-index
+3. **SearchProvider missing** — ensure `<WidgetsProvider>` wraps the component tree
 
 ---
 
-## Issue #7: Widget Not Rendering
+## Issue #3: "Search configuration missing" Error
 
-### Symptoms
-- Component doesn't appear
-- No errors
-- Page is blank where widget should be
+**Fix:**
+1. Check `.env.local` has `NEXT_PUBLIC_SEARCH_CUSTOMER_KEY`, `NEXT_PUBLIC_SEARCH_API_KEY`, `NEXT_PUBLIC_SEARCH_ENV`
+2. Restart dev server after adding/changing env vars
+3. Verify variable names match exactly
 
-### Diagnosis
+---
+
+## Issue #4: Widget Not Rendering
+
+**Symptoms:** Component doesn't appear, no errors.
+
+**Check:**
+1. `widget()` HOC wraps component export
+2. `WidgetDataType.SEARCH_RESULTS` specified correctly
+3. `<WidgetsProvider>` in component tree
+4. `widgetRef` attached to container div
+
 ```typescript
-// Check 1: widget() HOC used?
-export default widget(MyComponent, ...); // Is this present?
-
-// Check 2: Correct widget type?
-widget(Component, WidgetDataType.SEARCH_RESULTS, 'content');
-
-// Check 3: SearchProvider in tree?
-// Is <SearchProvider> wrapping the app?
-```
-
-### Solution
-```typescript
-// Ensure widget() HOC wraps component
-const MySearchWidget = () => {
+const MyWidget = () => {
   const { widgetRef, actions, queryResult } = useSearchResults();
   return <div ref={widgetRef}>{/* content */}</div>;
 };
 
-// CRITICAL: Export with widget() wrapper
-export default widget(
-  MySearchWidget,
-  WidgetDataType.SEARCH_RESULTS,
-  'content'
-);
+export default widget(MyWidget, WidgetDataType.SEARCH_RESULTS, 'content');
 ```
 
 ---
 
-## Issue #8: TypeScript Errors
+## Issue #5: TypeScript Errors
 
-### Symptoms
-- Type errors in IDE
-- `Property 'content' does not exist`
-- `Type 'unknown' is not assignable`
+**Symptoms:** `Property 'content' does not exist`, `Type 'unknown' is not assignable`
 
-### Solution
+**Fix:**
 ```typescript
-// Add type definitions
 interface SearchItem {
   id: string;
   title?: string;
   description?: string;
   url?: string;
-  [key: string]: any;  // For dynamic Sitecore fields
+  [key: string]: any;
 }
 
-// Use types
 const results = (queryResult.data?.content as SearchItem[]) || [];
 ```
 
 ---
 
-## Issue #9: Results Not Filtering
+## Issue #7: API Returns Hits But UI Shows No Results Or Too Few
 
-### Symptoms
-- Results show all content
-- Facets don't filter
-- Filters appear selected but results unchanged
+**Symptoms:** Search API/network payload returns results, but UI shows empty state or only a subset. This often happens when a client-side filter (e.g., `hasVisibleKeyphraseMatch`) hides the current batch, while later offsets still contain real visible hits.
 
-### Diagnosis
+**Cause:** UI treats `visibleResults.length === 0` as if backend results are exhausted. That is wrong when:
+- current fetched batch is all false positives
+- later offsets still contain visible matches
+- `hasMore` or no-results state is tied to `visibleResults`
+
+**Fix:** Separate visible UI state from backend exhaustion state.
 ```typescript
-// Check: Client-side filtering?
-const filtered = content.filter(item => ...); // This is wrong
+const hasMoreResults = accumulatedResults.length < totalItems;
+const isAutoLoadingMore =
+  !isLoading &&
+  keyphrase.trim().length >= 3 &&
+  visibleResults.length === 0 &&
+  accumulatedResults.length > 0 &&
+  hasMoreResults;
+
+useEffect(() => {
+  if (!isAutoLoadingMore) return;
+  void onLoadMore();
+}, [isAutoLoadingMore, onLoadMore]);
+
+const isNoResults =
+  !isLoading && !isAutoLoadingMore && visibleResults.length === 0;
+
+<ResultsList
+  results={visibleResults}
+  isLoading={isLoading || isAutoLoadingMore}
+  hasMore={hasMoreResults}
+/>
 ```
 
-### Solution
-```typescript
-// ❌ WRONG - Client-side filtering
-const filtered = content.filter(item => selectedFacets.includes(item.category));
+**Debug check:** In DevTools Network, inspect later offsets before concluding "not indexed." A valid result can exist on page 3+ even if page 1 is fully hidden client-side.
 
-// ✅ CORRECT - Let SDK filter server-side
-actions.onFacetClick({ ... });  // SDK handles filtering
-const items = queryResult.data?.content || [];  // Use as-is
-```
+See `ANTI-PATTERNS.md` #4 Mitigation and `LOAD-MORE-PAGINATION.md` Pitfall #6.
 
 ---
 
-## Issue #10: Clear Filters Doesn't Work
+## Issue #8: Facet Counts Don't Match Visible Results
 
-### Symptoms
-- Clear button doesn't clear filters
-- Some filters remain
-- URL still has query params
+**Symptoms:** Sidebar shows "All (22), Professionals (9)..." but only 1 result is visible. Facet counts reflect API totals, not what the user sees.
 
-### Solution
-```typescript
-// Must clear all 3 state layers
-const handleClearFilters = async () => {
-  // 1. SDK state
-  actions.onClearFilters();
-  actions.onKeyphraseChange({ keyphrase: '' });
+**Cause:** Facet counts come from API response or `accumulatedResults`, not `visibleResults`. When client-side filtering hides results, counts become misleading.
 
-  // 2. URL state
-  if (router.isReady) {
-    await searchUrlManager.clearAllFilters(router);
-  }
-
-  // 3. Local component state
-  setSearchTerm('');
-  setLocalFilters({});
-};
-```
-
----
-
-## Issue #11: Pagination Not Working
-
-### Symptoms
-- Clicking page numbers doesn't change results
-- URL doesn't update with page number
-- Always shows first page
-
-### Solution
-```typescript
-const handlePageChange = async (page: number) => {
-  // 1. Update SDK
-  actions.onPageNumberChange({ page });
-
-  // 2. Update URL
-  if (router.isReady) {
-    await searchUrlManager.setPage(router, page);
-  }
-};
-```
-
----
-
-## Issue #12: Page Doesn't Reset After Search
-
-### Symptoms
-- Searching while on page 5 stays on page 5
-- New search shows wrong results
-- Pagination out of sync
-
-### Solution
-```typescript
-// SearchUrlManager should auto-reset pagination
-// If not working, check:
-
-// 1. Using correct method?
-await searchUrlManager.setSearchTerm(router, term);  // This auto-resets
-
-// 2. Not manually setting page?
-// Remove this:
-actions.onPageNumberChange({ page: 1 });  // SearchUrlManager does this
-
-// SearchUrlManager handles auto-reset for:
-// - setSearchTerm()
-// - addFacet()
-// - removeFacet()
-// - setTab()
-```
+**Fix:** When `visibleResults.length < accumulatedResults.length`, recompute facet counts from `visibleResults` and remove facets with 0 visible results. Do not reuse that visible count logic for `hasMore` or no-results exhaustion. See `ANTI-PATTERNS.md` #4 Mitigation.
 
 ---
 
 ## Debugging Tools
 
-### Console Logging
-
+**Console logging:**
 ```typescript
-// Log facet structure
 console.log('Facets:', queryResult.data?.facet);
-queryResult.data?.facet?.forEach(f => {
-  console.log(`${f.name}:`, f.value.map(v => ({ id: v.id, text: v.text })));
-});
-
-// Log URL state
 console.log('URL state:', searchUrlManager.getCurrentState());
-
-// Log router state
-console.log('Router ready:', router.isReady);
-console.log('Router query:', router.query);
+console.log('Search term:', searchParams.get('q'));
+console.log('Page:', searchParams.get('p'));
+console.log('Facets param:', searchParams.get('facets'));
 ```
 
-### Validation Script
-
+**Validation script:**
 ```bash
-# Run automated checks
 bash scripts/validate-search-code.sh src/components/MyWidget.tsx
 ```
 
-### Network Tab
-
-- Open browser DevTools → Network
-- Filter: "XHR"
-- Look for calls to Sitecore Search API
-- Check request parameters
-- Check response status and data
+**Network tab:** DevTools -> Network -> XHR -> look for Sitecore Search API calls, check status and response.
 
 ---
 
-## Getting Help
-
-1. **Run validation script:** `bash scripts/validate-search-code.sh`
-2. **Check anti-patterns:** Read `ANTI-PATTERNS.md`
-3. **Review implementation:** Read `QUICK-START.md`
-4. **Check templates:** See `templates/` directory
-
----
-
-**Most Common Issues:**
-1. Using `facetValue.text` instead of `.id` (40%)
-2. Missing `onFacetClick` parameters (25%)
-3. Missing URL synchronization (20%)
-
-Fix these 3 and you'll solve 85% of problems.
+Most common issues are anti-patterns #1-3. See `ANTI-PATTERNS.md` for full list and fixes.

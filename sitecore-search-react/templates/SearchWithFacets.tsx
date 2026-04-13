@@ -1,20 +1,30 @@
 /**
- * Search Widget with Facets Template
+ * Search Widget with Facets Template (App Router)
  *
  * Complete search widget with facet filtering.
  * Demonstrates proper facet implementation with URL sync.
  *
  * Features:
  * - Search input with form submission
- * - Checkbox facet filters
+ * - Checkbox facet filters with clear-and-reapply strategy
+ * - Fixed Facet Contract (facet categories remain visible even when empty)
  * - Clear all filters
  * - Results list
  * - Pagination
- * - Full URL synchronization
+ * - Full URL synchronization via SearchUrlManager
+ *
+ * IMPORTANT: Facet clicks use the clear-and-reapply strategy from useSiteSearch.
+ * The URL is the source of truth. On each facet change:
+ *   1. Update URL state via searchUrlManager
+ *   2. Clear SDK filters: actions.onClearFilters()
+ *   3. Re-apply keyphrase
+ *   4. Re-apply remaining facets from searchUrlManager state using type: 'text'
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
-import { useRouter } from 'next/router';
+'use client';
+
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { widget, useSearchResults } from '@sitecore-search/react';
 import { WidgetDataType, SearchResponseFacet } from '@sitecore-search/data';
 import { searchUrlManager } from '@/atoms/search/utils/searchUrlManager';
@@ -28,120 +38,215 @@ interface SearchItem {
   type?: string;
 }
 
+interface DisplayFacet {
+  name: string;
+  label: string;
+  values: SearchResponseFacet['value'];
+  isDisabled: boolean;
+}
+
+// Fixed Facet Contract (Pattern 5): Facet categories remain visible
+// even when Sitecore Search omits empty facets from the response.
+const FIXED_FACET_CONFIG = [
+  { name: 'category', label: 'Category' },
+  { name: 'type', label: 'Type' },
+] as const;
+
+const buildDisplayFacets = (
+  facets: SearchResponseFacet[] = [],
+): DisplayFacet[] => {
+  const facetsByName = new Map(facets.map((facet) => [facet.name, facet]));
+
+  return FIXED_FACET_CONFIG.map((config) => {
+    const facet = facetsByName.get(config.name);
+    const values = (facet?.value || []).filter((value) => value.count > 0);
+
+    return {
+      name: config.name,
+      label: config.label,
+      values,
+      isDisabled: values.length === 0,
+    };
+  });
+};
+
 const SearchWithFacetsWidget = () => {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const initializedRef = useRef(false);
+
   const { widgetRef, actions, queryResult } = useSearchResults<SearchItem>();
 
-  const [searchInputValue, setSearchInputValue] = useState('');
+  const [searchInputValue, setSearchInputValue] = useState(
+    searchParams.get('q') || ''
+  );
+  const [currentPage, setCurrentPage] = useState(1);
 
-  // Initialize from URL
+  // Initialize SearchUrlManager on mount
   useEffect(() => {
-    if (!router.isReady) return;
+    if (initializedRef.current) return;
 
-    const initialState = searchUrlManager.initialize(router, {
+    const initialState = searchUrlManager.initialize(searchParams, {
       onKeyphraseChange: ({ keyphrase }) => {
         actions.onKeyphraseChange({ keyphrase });
         setSearchInputValue(keyphrase);
       },
-      onPageNumberChange: ({ page }) => actions.onPageNumberChange({ page }),
+      onPageNumberChange: ({ page }) => {
+        setCurrentPage(page);
+        actions.onPageNumberChange({ page });
+      },
       onFacetClick: (payload) => actions.onFacetClick(payload),
-      setSearchTerm: (term) => setSearchInputValue(term),
+      onClearFilters: () => {
+        actions.onClearFilters();
+        actions.onKeyphraseChange({ keyphrase: '' });
+        setSearchInputValue('');
+        setCurrentPage(1);
+      },
+      onClearFacets: () => {
+        // Clear SDK filters but preserve keyphrase
+        const term = searchUrlManager.getCurrentState().searchTerm || '';
+        actions.onClearFilters();
+        if (term) {
+          actions.onKeyphraseChange({ keyphrase: term });
+        }
+        setCurrentPage(1);
+        actions.onPageNumberChange({ page: 1 });
+      },
     });
 
     if (initialState.searchTerm) {
       setSearchInputValue(initialState.searchTerm);
     }
-  }, [router.isReady]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (initialState.page) {
+      setCurrentPage(initialState.page);
+    }
 
-  // Sync on URL changes
+    initializedRef.current = true;
+  }, [searchParams, actions]);
+
+  // Sync on URL changes (back/forward navigation)
   useEffect(() => {
-    if (!router.isReady) return;
-    searchUrlManager.syncFromUrl(router);
-  }, [router.query, router.isReady]);
+    if (initializedRef.current) {
+      searchUrlManager.syncFromUrl(searchParams);
+    }
+  }, [searchParams]);
 
   // Handle search
-  const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    actions.onKeyphraseChange({ keyphrase: searchInputValue });
+  const handleSearch = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
 
-    if (router.isReady) {
-      await searchUrlManager.setSearchTerm(router, searchInputValue);
-    }
-  };
+      actions.onKeyphraseChange({ keyphrase: searchInputValue });
+      actions.onPageNumberChange({ page: 1 });
+      setCurrentPage(1);
 
-  // Handle facet selection
-  const handleFacetClick = async (facetId: string, facetValueId: string, checked: boolean) => {
-    const facets = queryResult.data?.facet || [];
-    const facetIndex = facets.findIndex((f) => f.name === facetId) || 0;
+      await searchUrlManager.setSearchTerm(
+        router,
+        pathname,
+        searchParams,
+        searchInputValue
+      );
+    },
+    [actions, router, pathname, searchParams, searchInputValue]
+  );
 
-    // Update SDK - CRITICAL: Use facetValue.id NOT facetValue.text
-    actions.onFacetClick({
-      facetId,
-      facetValueId, // Must be facetValue.id
-      type: 'valueId',
-      checked,
-      facetIndex,
-    });
-
-    // Update URL
-    if (router.isReady) {
+  // Handle facet selection using clear-and-reapply strategy
+  const handleFacetClick = useCallback(
+    async (facetId: string, facetValueText: string, checked: boolean) => {
+      // 1. Update URL state (source of truth)
       if (checked) {
-        await searchUrlManager.addFacet(router, facetId, facetValueId);
+        await searchUrlManager.addFacet(
+          router,
+          pathname,
+          searchParams,
+          facetId,
+          facetValueText
+        );
       } else {
-        await searchUrlManager.removeFacet(router, facetId, facetValueId);
+        await searchUrlManager.removeFacet(
+          router,
+          pathname,
+          searchParams,
+          facetId,
+          facetValueText
+        );
       }
-    }
-  };
+
+      // 2. Clear SDK filters
+      const term = searchUrlManager.getCurrentState().searchTerm || '';
+      actions.onClearFilters();
+
+      // 3. Re-apply keyphrase
+      if (term) {
+        actions.onKeyphraseChange({ keyphrase: term });
+      }
+
+      // 4. Re-apply remaining facets from URL state using text-based type
+      const remainingFacets = searchUrlManager.getCurrentState().facets || {};
+      Object.entries(remainingFacets).forEach(([fId, textValues]) => {
+        textValues.forEach((fText) => {
+          actions.onFacetClick({
+            facetId: fId,
+            facetValueText: fText,
+            checked: true,
+            type: 'text',
+            facetIndex: 0,
+          });
+        });
+      });
+
+      // 5. Reset pagination
+      setCurrentPage(1);
+      actions.onPageNumberChange({ page: 1 });
+    },
+    [actions, router, pathname, searchParams]
+  );
 
   // Clear all filters
-  const handleClearAll = async () => {
-    // Clear SDK
-    actions.onClearFilters();
-    actions.onKeyphraseChange({ keyphrase: '' });
-
-    // Clear local state
-    setSearchInputValue('');
-
-    // Clear URL
-    if (router.isReady) {
-      await searchUrlManager.clearAllFilters(router);
-    }
-  };
+  const handleClearAll = useCallback(async () => {
+    await searchUrlManager.clearAllFilters(router, pathname, searchParams);
+  }, [router, pathname, searchParams]);
 
   // Handle pagination
-  const handlePageChange = async (page: number) => {
-    actions.onPageNumberChange({ page });
+  const handlePageChange = useCallback(
+    async (page: number) => {
+      setCurrentPage(page);
+      actions.onPageNumberChange({ page });
+      await searchUrlManager.setPage(router, pathname, searchParams, page);
+    },
+    [actions, router, pathname, searchParams]
+  );
 
-    if (router.isReady) {
-      await searchUrlManager.setPage(router, page);
-    }
-  };
+  // Get selected facet values from URL search params
+  const getSelectedFacetValues = useCallback(
+    (facetId: string): string[] => {
+      const facetsParam = searchParams.get('facets');
+      if (!facetsParam) return [];
 
-  // Get selected facet values from URL
-  const getSelectedFacetValues = (facetId: string): string[] => {
-    if (!router.isReady || !router.query.facets) return [];
+      try {
+        const params = new URLSearchParams(facetsParam);
+        return Array.from(params.entries())
+          .filter(([id]) => id === facetId)
+          .map(([, value]) => value);
+      } catch {
+        return [];
+      }
+    },
+    [searchParams]
+  );
 
-    try {
-      const params = new URLSearchParams(router.query.facets as string);
-      return Array.from(params.entries())
-        .filter(([id]) => id === facetId)
-        .map(([, value]) => value);
-    } catch {
-      return [];
-    }
-  };
-
-  // Get facets from API response
-  const facets = queryResult.data?.facet || [];
-  const categoryFacet = facets.find((f) => f.name === 'category');
-  const typeFacet = facets.find((f) => f.name === 'type');
+  // Build display facets from API response
+  const displayFacets = useMemo(
+    () => buildDisplayFacets(queryResult.data?.facet || []),
+    [queryResult.data?.facet],
+  );
 
   // Get results
   const results = (queryResult.data?.content as SearchItem[]) || [];
   const totalResults = queryResult.data?.total_item || 0;
   const limit = queryResult.data?.limit || 24;
   const offset = queryResult.data?.offset || 0;
-  const currentPage = Math.floor(offset / limit) + 1;
   const totalPages = Math.ceil(totalResults / limit);
 
   return (
@@ -167,55 +272,39 @@ const SearchWithFacetsWidget = () => {
             </button>
           </div>
 
-          {/* Category Facet */}
-          {categoryFacet && categoryFacet.value && categoryFacet.value.length > 0 && (
-            <div className="facet-group">
-              <h4>Category</h4>
-              {categoryFacet.value.map((facetValue) => {
-                const selectedValues = getSelectedFacetValues('category');
-                const isSelected = selectedValues.includes(facetValue.id);
+          {displayFacets.map((facet) => (
+            <div
+              key={facet.name}
+              className={facet.isDisabled ? 'facet-group facet-group-disabled' : 'facet-group'}
+              aria-disabled={facet.isDisabled}
+            >
+              <h4>{facet.label}</h4>
+              {facet.values.length > 0 ? (
+                facet.values.map((facetValue) => {
+                  const selectedValues = getSelectedFacetValues(facet.name);
+                  const isSelected = selectedValues.includes(facetValue.text);
 
-                return (
-                  <label key={facetValue.id} className="facet-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={(e) =>
-                        handleFacetClick('category', facetValue.id, e.target.checked)
-                      }
-                    />
-                    <span>
-                      {facetValue.text} ({facetValue.count})
-                    </span>
-                  </label>
-                );
-              })}
+                  return (
+                    <label key={facetValue.id} className="facet-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={(e) =>
+                          handleFacetClick(facet.name, facetValue.text, e.target.checked)
+                        }
+                        disabled={facet.isDisabled}
+                      />
+                      <span>
+                        {facetValue.text} ({facetValue.count})
+                      </span>
+                    </label>
+                  );
+                })
+              ) : (
+                <p>No options available</p>
+              )}
             </div>
-          )}
-
-          {/* Type Facet */}
-          {typeFacet && typeFacet.value && typeFacet.value.length > 0 && (
-            <div className="facet-group">
-              <h4>Type</h4>
-              {typeFacet.value.map((facetValue) => {
-                const selectedValues = getSelectedFacetValues('type');
-                const isSelected = selectedValues.includes(facetValue.id);
-
-                return (
-                  <label key={facetValue.id} className="facet-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={(e) => handleFacetClick('type', facetValue.id, e.target.checked)}
-                    />
-                    <span>
-                      {facetValue.text} ({facetValue.count})
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          )}
+          ))}
         </aside>
 
         {/* Results Area */}
@@ -270,4 +359,3 @@ const SearchWithFacetsWidget = () => {
 };
 
 export default widget(SearchWithFacetsWidget, WidgetDataType.SEARCH_RESULTS, 'content');
-

@@ -1,5 +1,5 @@
 /**
- * Basic Search Widget Template
+ * Basic Search Widget Template (App Router)
  *
  * Simple search widget with input, results, and pagination.
  * Copy and adapt for your needs.
@@ -10,10 +10,13 @@
  * - Empty state and loading state
  * - Results summary
  * - Basic pagination
+ * - URL state synchronization via SearchUrlManager
  */
 
-import React, { useState, useEffect } from 'react';
-import { useRouter } from 'next/router';
+'use client';
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { widget, useSearchResults } from '@sitecore-search/react';
 import { WidgetDataType } from '@sitecore-search/data';
 import { searchUrlManager } from '@/atoms/search/utils/searchUrlManager';
@@ -30,57 +33,85 @@ interface SearchItem {
 
 const BasicSearchWidget = () => {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const initializedRef = useRef(false);
+
   const { widgetRef, actions, queryResult } = useSearchResults<SearchItem>();
 
-  const [searchInputValue, setSearchInputValue] = useState('');
+  const [searchInputValue, setSearchInputValue] = useState(
+    searchParams.get('q') || ''
+  );
 
-  // Initialize from URL on mount
+  // Initialize SearchUrlManager on mount
   useEffect(() => {
-    if (!router.isReady) return;
+    if (initializedRef.current) return;
 
-    const initialState = searchUrlManager.initialize(router, {
+    const initialState = searchUrlManager.initialize(searchParams, {
       onKeyphraseChange: ({ keyphrase }) => {
         actions.onKeyphraseChange({ keyphrase });
         setSearchInputValue(keyphrase);
       },
       onPageNumberChange: ({ page }) => actions.onPageNumberChange({ page }),
-      setSearchTerm: (term) => setSearchInputValue(term),
+      onClearFilters: () => {
+        actions.onClearFilters();
+        actions.onKeyphraseChange({ keyphrase: '' });
+        setSearchInputValue('');
+      },
+      onClearFacets: () => {
+        const term = searchUrlManager.getCurrentState().searchTerm || '';
+        actions.onClearFilters();
+        if (term) {
+          actions.onKeyphraseChange({ keyphrase: term });
+        }
+      },
     });
 
     if (initialState.searchTerm) {
       setSearchInputValue(initialState.searchTerm);
     }
-  }, [router.isReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync on URL changes (back/forward button)
+    initializedRef.current = true;
+  }, [searchParams, actions]);
+
+  // Sync on URL changes (back/forward navigation)
   useEffect(() => {
-    if (!router.isReady) return;
-    searchUrlManager.syncFromUrl(router);
-  }, [router.query, router.isReady]);
+    if (initializedRef.current) {
+      searchUrlManager.syncFromUrl(searchParams);
+    }
+  }, [searchParams]);
 
   // Handle search submission
-  const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSearch = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
 
-    // Update SDK
-    actions.onKeyphraseChange({ keyphrase: searchInputValue });
+      // Update SDK
+      actions.onKeyphraseChange({ keyphrase: searchInputValue });
+      actions.onPageNumberChange({ page: 1 });
 
-    // Update URL
-    if (router.isReady) {
-      await searchUrlManager.setSearchTerm(router, searchInputValue);
-    }
-  };
+      // Update URL
+      await searchUrlManager.setSearchTerm(
+        router,
+        pathname,
+        searchParams,
+        searchInputValue
+      );
+    },
+    [actions, router, pathname, searchParams, searchInputValue]
+  );
 
   // Handle pagination
-  const handlePageChange = async (page: number) => {
-    // Update SDK
-    actions.onPageNumberChange({ page });
+  const handlePageChange = useCallback(
+    async (page: number) => {
+      // Update SDK
+      actions.onPageNumberChange({ page });
 
-    // Update URL
-    if (router.isReady) {
-      await searchUrlManager.setPage(router, page);
-    }
-  };
+      // Update URL
+      await searchUrlManager.setPage(router, pathname, searchParams, page);
+    },
+    [actions, router, pathname, searchParams]
+  );
 
   // Get results data
   const results = (queryResult.data?.content as SearchItem[]) || [];
@@ -131,7 +162,7 @@ const BasicSearchWidget = () => {
                 {item.type && <span className="result-type">{item.type}</span>}
                 {item.url && (
                   <a href={item.url} className="result-link">
-                    Read more →
+                    Read more
                   </a>
                 )}
               </div>
@@ -143,7 +174,7 @@ const BasicSearchWidget = () => {
       {/* Empty State */}
       {!isLoading && totalResults === 0 && searchInputValue && (
         <div className="empty-state">
-          <p>No results found for "{searchInputValue}"</p>
+          <p>No results found for &ldquo;{searchInputValue}&rdquo;</p>
           <p>Try adjusting your search terms</p>
         </div>
       )}
@@ -178,4 +209,3 @@ const BasicSearchWidget = () => {
 
 // Export with widget HOC
 export default widget(BasicSearchWidget, WidgetDataType.SEARCH_RESULTS, 'content');
-

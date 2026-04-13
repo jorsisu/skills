@@ -1,255 +1,228 @@
 /**
- * Custom Search Hook Template
- * 
+ * Custom Search Hook Template (App Router)
+ *
  * Template for creating domain-specific search controller hooks.
- * Encapsulates search logic, URL synchronization, and state management.
- * 
- * Usage: Adapt this template for your specific search needs.
- * Example: useProductSearchController, useBlogSearchController, etc.
+ * Follows patterns from useSiteSearch.ts: initializedRef guard,
+ * SearchUrlManager with (router, pathname, searchParams) signatures,
+ * clear-and-reapply facet strategy, and onClearFacets callback.
+ *
+ * Usage: Adapt for your specific search needs.
+ * Example: useProductSearch, useBlogSearch, useProfessionalSearch, etc.
  */
 
-import { useCallback, useEffect, useState, useMemo } from 'react';
-import { useRouter } from 'next/router';
-import { useSearchResults, SearchResponseFacet } from '@sitecore-search/react';
+'use client';
+
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+import { useSearchResults } from '@sitecore-search/react';
+import type { SearchResultsWidgetQuery } from '@sitecore-search/react';
 import { searchUrlManager } from '@/atoms/search/utils/searchUrlManager';
 
 // Define your controller parameters
-export interface CustomSearchControllerParams {
-  onSearchActivated?: () => void;
-  onClearFilters?: () => void;
+export interface CustomSearchParams {
   itemsPerPage?: number;
-  sourceIds?: string[]; // Optional: Sitecore Search source IDs
-  mainFacetId?: string; // Your primary facet
+  onSearchActivated?: () => void;
 }
 
-// Define what your hook returns
-export interface CustomSearchController {
-  widgetRef: ReturnType<typeof useSearchResults>['widgetRef'];
-  searchInputValue: string;
-  setSearchInputValue: (value: string) => void;
-  submitSearch: (term?: string) => Promise<void>;
-  facetOptions: Array<{ id: string; text: string; count: number }>;
-  handleFacetSelection: (facetId: string, facetValueId: string, checked: boolean) => Promise<void>;
-  getSelectedFacetValues: (facetId: string) => string[];
-  clearAll: () => Promise<void>;
-  results: any[];
-  totalResults: number;
-  currentPage: number;
-  totalPages: number;
-  isLoading: boolean;
-}
-
-// Utility: Get facet index
-const getFacetIndex = (facets: SearchResponseFacet[], facetId: string): number => {
-  const index = facets.findIndex((facet) => facet.name === facetId);
-  return index >= 0 ? index : 0;
-};
-
-// Utility: Get selected facet values from URL
-const getFacetSelectionsFromUrl = (
-  router: ReturnType<typeof useRouter>,
-  facetId: string
-): string[] => {
-  if (!router.isReady || !router.query.facets) return [];
-
-  try {
-    const params = new URLSearchParams(router.query.facets as string);
-    return Array.from(params.entries())
-      .filter(([id]) => id === facetId)
-      .map(([, value]) => value);
-  } catch {
-    return [];
-  }
-};
-
-export const useCustomSearchController = ({
-  onSearchActivated,
-  onClearFilters,
+export const useCustomSearch = ({
   itemsPerPage = 24,
-  sourceIds,
-  mainFacetId = 'category', // Default facet ID
-}: CustomSearchControllerParams = {}): CustomSearchController => {
+  onSearchActivated,
+}: CustomSearchParams = {}) => {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const initializedRef = useRef(false);
 
-  // Build search query configuration
-  const buildQuery = useCallback(
-    (searchQuery) => {
-      const request = searchQuery.getRequest();
-
-      // Set sources if provided
-      if (sourceIds && sourceIds.length > 0) {
-        request.setSources(sourceIds);
-      }
-
-      // Set items per page
-      if (itemsPerPage) {
-        request.setSearchLimit(itemsPerPage);
-      }
-
-      // Optional: Set facet sort order
-      request.setSearchFacetSort({
-        name: 'text',
-        order: 'asc',
-      });
-
-      return request;
-    },
-    [itemsPerPage, sourceIds]
+  // Local state
+  const [searchInputValue, setSearchInputValue] = useState(
+    searchParams.get('q') || ''
   );
+  const [currentKeyphrase, setCurrentKeyphrase] = useState(
+    searchParams.get('q') || ''
+  );
+  const [currentPage, setCurrentPage] = useState(1);
 
-  // Initialize search widget
+  // Query function for Sitecore Search SDK
+  const queryFunction = (query: SearchResultsWidgetQuery) => {
+    const request = query.getRequest();
+    request.setSearchLimit(itemsPerPage);
+    // Add custom filters, sources, facet sort, etc. here
+    return request;
+  };
+
   const { widgetRef, actions, queryResult } = useSearchResults({
-    query: buildQuery,
+    query: queryFunction,
+    state: {
+      keyphrase: currentKeyphrase,
+    },
   });
 
-  const [searchInputValue, setSearchInputValue] = useState('');
+  const selectedFacets = searchUrlManager.getCurrentState().facets || {};
 
-  // Get facets from results
-  const facets = useMemo(() => queryResult.data?.facet ?? [], [queryResult.data?.facet]);
-  
-  const mainFacet = useMemo(
-    () => facets.find((facet) => facet.name === mainFacetId),
-    [facets, mainFacetId]
-  );
-
-  // Initialize from URL on mount
+  // Initialize SearchUrlManager on mount (runs once via initializedRef)
   useEffect(() => {
-    if (!router.isReady) return;
+    if (initializedRef.current) return;
 
-    const initialState = searchUrlManager.initialize(router, {
+    const initialState = searchUrlManager.initialize(searchParams, {
       onKeyphraseChange: ({ keyphrase }) => {
-        actions.onKeyphraseChange({ keyphrase });
+        setCurrentKeyphrase(keyphrase);
         setSearchInputValue(keyphrase);
+        actions.onKeyphraseChange({ keyphrase });
       },
-      onPageNumberChange: ({ page }) => actions.onPageNumberChange({ page }),
-      onFacetClick: (payload) => actions.onFacetClick(payload),
-      setSearchTerm: (term) => setSearchInputValue(term),
+      onPageNumberChange: ({ page }) => {
+        setCurrentPage(page);
+        actions.onPageNumberChange({ page });
+      },
+      onFacetClick: (payload) => {
+        actions.onFacetClick(payload);
+      },
       onClearFilters: () => {
         actions.onClearFilters();
         actions.onKeyphraseChange({ keyphrase: '' });
+        setCurrentKeyphrase('');
         setSearchInputValue('');
-        onClearFilters?.();
+        setCurrentPage(1);
+      },
+      onClearFacets: () => {
+        // Clear SDK filters but preserve keyphrase
+        const term = searchUrlManager.getCurrentState().searchTerm || '';
+        actions.onClearFilters();
+        if (term) {
+          actions.onKeyphraseChange({ keyphrase: term });
+        }
+        setCurrentPage(1);
+        actions.onPageNumberChange({ page: 1 });
       },
     });
 
+    // Apply initial state from URL
     if (initialState.searchTerm) {
+      setCurrentKeyphrase(initialState.searchTerm);
       setSearchInputValue(initialState.searchTerm);
     }
-  }, [router.isReady]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (initialState.page) {
+      setCurrentPage(initialState.page);
+    }
 
-  // Sync on URL changes (back/forward button)
+    initializedRef.current = true;
+  }, [searchParams, actions]);
+
+  // Sync from URL on changes (back/forward navigation)
   useEffect(() => {
-    if (!router.isReady) return;
-    searchUrlManager.syncFromUrl(router);
-  }, [router.query, router.isReady]);
+    if (initializedRef.current) {
+      searchUrlManager.syncFromUrl(searchParams);
+    }
+  }, [searchParams]);
 
-  // Submit search
-  const submitSearch = useCallback(
-    async (term?: string) => {
-      const keyphrase = term ?? searchInputValue;
-      
+  // Handler: Submit Search
+  const onSearchSubmit = useCallback(
+    async (term: string) => {
+      setCurrentKeyphrase(term);
+      setCurrentPage(1);
+
       // Update SDK
-      actions.onKeyphraseChange({ keyphrase });
+      actions.onKeyphraseChange({ keyphrase: term });
+      actions.onPageNumberChange({ page: 1 });
 
       // Update URL (auto-resets pagination)
-      if (router.isReady) {
-        await searchUrlManager.setSearchTerm(router, keyphrase);
-      }
+      await searchUrlManager.setSearchTerm(router, pathname, searchParams, term);
 
-      // Notify callback
-      if (keyphrase.trim().length > 0) {
+      if (term.trim().length > 0) {
         onSearchActivated?.();
       }
     },
-    [actions, onSearchActivated, router, searchInputValue]
+    [actions, router, pathname, searchParams, onSearchActivated]
   );
 
-  // Handle facet selection
-  const handleFacetSelection = useCallback(
-    async (facetId: string, facetValueId: string, checked: boolean) => {
-      if (!router.isReady) return;
+  // Handler: Facet Click (clear-and-reapply strategy)
+  // URL is source of truth. SDK is rebuilt from it on each change.
+  const onFacetClick = useCallback(
+    async ({
+      facetId,
+      facetValueText,
+      checked,
+    }: {
+      facetId: string;
+      facetValueText: string;
+      checked: boolean;
+    }) => {
+      // 1. Update URL state (source of truth)
+      if (checked) {
+        await searchUrlManager.addFacet(
+          router, pathname, searchParams,
+          facetId, facetValueText
+        );
+      } else {
+        await searchUrlManager.removeFacet(
+          router, pathname, searchParams,
+          facetId, facetValueText
+        );
+      }
 
-      const facetIndex = getFacetIndex(facets, facetId);
+      // 2. Clear SDK filters and re-apply from URL state
+      const term = searchUrlManager.getCurrentState().searchTerm || '';
+      actions.onClearFilters();
 
-      // Update SDK - CRITICAL: Use facetValue.id NOT facetValue.text
-      actions.onFacetClick({
-        facetId,
-        facetValueId, // Must be .id from facetValue
-        type: 'valueId',
-        checked,
-        facetIndex,
+      if (term) {
+        actions.onKeyphraseChange({ keyphrase: term });
+      }
+
+      // 3. Re-apply remaining facets using consistent text-based type
+      const remainingFacets = searchUrlManager.getCurrentState().facets || {};
+      Object.entries(remainingFacets).forEach(([fId, textValues]) => {
+        textValues.forEach((fText) => {
+          actions.onFacetClick({
+            facetId: fId,
+            facetValueText: fText,
+            checked: true,
+            type: 'text',
+            facetIndex: 0,
+          });
+        });
       });
 
-      // Update URL (auto-resets pagination)
-      if (checked) {
-        await searchUrlManager.addFacet(router, facetId, facetValueId);
-      } else {
-        await searchUrlManager.removeFacet(router, facetId, facetValueId);
-      }
-
-      // Notify callback
-      onSearchActivated?.();
+      // 4. Reset pagination
+      setCurrentPage(1);
+      actions.onPageNumberChange({ page: 1 });
     },
-    [actions, facets, onSearchActivated, router]
+    [actions, router, pathname, searchParams]
   );
 
-  // Get selected facet values
-  const getSelectedFacetValues = useCallback(
-    (facetId: string) => {
-      // Try SearchUrlManager state first
-      const stateSelections = searchUrlManager.getCurrentState().facets?.[facetId];
-      if (Array.isArray(stateSelections) && stateSelections.length > 0) {
-        return [...stateSelections];
-      }
+  // Handler: Clear All Facets
+  const onClearFacets = useCallback(async () => {
+    await searchUrlManager.clearFacets(router, pathname, searchParams);
+  }, [router, pathname, searchParams]);
 
-      // Fallback to URL parsing
-      return getFacetSelectionsFromUrl(router, facetId);
-    },
-    [router]
-  );
+  // Handler: Clear All Filters (search + facets)
+  const onClearAllFilters = useCallback(async () => {
+    await searchUrlManager.clearAllFilters(router, pathname, searchParams);
+  }, [router, pathname, searchParams]);
 
-  // Clear all filters
-  const clearAll = useCallback(async () => {
-    // Clear SDK
-    actions.onClearFilters();
-    actions.onKeyphraseChange({ keyphrase: '' });
-    
-    // Clear local state
-    setSearchInputValue('');
+  // Handler: Load More / Pagination
+  const onLoadMore = useCallback(async () => {
+    const newPage = currentPage + 1;
+    setCurrentPage(newPage);
+    actions.onPageNumberChange({ page: newPage });
+    await searchUrlManager.setPage(router, pathname, searchParams, newPage);
+  }, [actions, currentPage, router, pathname, searchParams]);
 
-    // Clear URL
-    if (router.isReady) {
-      await searchUrlManager.clearAllFilters(router);
-    }
-
-    // Notify callback
-    onClearFilters?.();
-  }, [actions, onClearFilters, router]);
-
-  // Extract results data
-  const results = (queryResult.data?.content as any[]) || [];
-  const totalResults = queryResult.data?.total_item || 0;
-  const limit = queryResult.data?.limit || itemsPerPage;
-  const offset = queryResult.data?.offset || 0;
-  const currentPage = Math.floor(offset / limit) + 1;
-  const totalPages = Math.ceil(totalResults / limit);
-
-  // Return controller API
   return {
     widgetRef,
+    results: queryResult.data?.content ?? [],
+    totalItems: queryResult.data?.total_item ?? 0,
+    facets: queryResult.data?.facet ?? [],
+    selectedFacets,
+    isLoading: queryResult.isLoading,
+    page: currentPage,
+    keyphrase: currentKeyphrase,
     searchInputValue,
     setSearchInputValue,
-    submitSearch,
-    facetOptions: mainFacet?.value || [],
-    handleFacetSelection,
-    getSelectedFacetValues,
-    clearAll,
-    results,
-    totalResults,
-    currentPage,
-    totalPages,
-    isLoading: queryResult.isLoading,
+    onSearchSubmit,
+    onFacetClick,
+    onClearFacets,
+    onClearAllFilters,
+    onLoadMore,
   };
 };
 
-export default useCustomSearchController;
+export default useCustomSearch;

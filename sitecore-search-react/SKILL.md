@@ -1,236 +1,106 @@
 ---
-name: sitecore-search
-description: Implements Sitecore Search in Next.js with facets, URL synchronization, and SearchUrlManager singleton. Detects anti-patterns like using facetValue.text instead of .id. Use when user mentions Sitecore Search, facets not filtering, search widgets, SearchUrlManager, or URL state management.
-version: 1.0.0
-last_updated: 2024-12-03
-source: Shriners XMCloud Next.js v15.3.1
+name: sitecore-search-react
+description: Implements Sitecore Search in Next.js App Router with facets, URL synchronization, and SearchUrlManager singleton. Detects anti-patterns like using facetValue.text instead of .id. Use when user mentions Sitecore Search, facets not filtering, search widgets, SearchUrlManager, URL state management, facetValue (.id vs .text), search widget implementation or debugging, back button broken, load more pagination, false no-results states, or code review for search implementations.
 ---
 
 # Sitecore Search Expert
 
-Production-tested patterns for implementing Sitecore Search in Next.js with proper URL synchronization, facet handling, and anti-pattern prevention.
+Next.js App Router patterns for Sitecore Search with `next/navigation`.
 
-## When to Invoke
+## Decision Tree
 
-**Trigger keywords:**
-- "Sitecore Search" (implementation, setup, configuration)
-- "facets" or "filters" (not filtering, not working)
-- "SearchUrlManager" (singleton, URL sync)
-- "search widget" (implementation, debugging)
-- "URL state" (synchronization, back button, shareability)
-- "facetValue" (using .id vs .text)
-- Code review for search implementations
+**Implementing from scratch?** Read `QUICK-START.md`
 
-## Quick Decision Tree
+**Debugging?**
+- Facets not filtering → `ANTI-PATTERNS.md` #1-2
+- Facet categories disappear when empty → `FACETS.md` "Pattern 5: Fixed Facet Contract"
+- URL not updating → `ANTI-PATTERNS.md` #3
+- Back button broken → `TROUBLESHOOTING.md`
+- Load more duplicates / wrong count → `LOAD-MORE-PAGINATION.md`
+- API returns hits but UI shows none / too few → `TROUBLESHOOTING.md` #7 + `LOAD-MORE-PAGINATION.md`
+- Any issue → `TROUBLESHOOTING.md` first
 
-### 🚀 **Implementing from Scratch?**
-→ Read `QUICK-START.md` for step-by-step setup
+**Code review?** `ANTI-PATTERNS.md` + run `scripts/validate-search-code.sh`
 
-### 🐛 **Debugging Issues?**
-- **Facets not filtering** → Read `ANTI-PATTERNS.md` #1-2
-- **URL not updating** → Read `ANTI-PATTERNS.md` #3, #8
-- **Back button broken** → Read `TROUBLESHOOTING.md` "Back button"
-- **Results not appearing** → Read `TROUBLESHOOTING.md` "No results"
-- **Any search issue** → Read `TROUBLESHOOTING.md` first
-
-### 🔍 **Code Review?**
-→ Read `ANTI-PATTERNS.md` + run `scripts/validate-search-code.sh`
-
-### 🏗️ **Need Specific Component?**
+**Need a component?**
 - SearchProvider → `templates/SearchProvider.tsx`
 - SearchUrlManager → `SEARCHURLMANAGER.md` + `templates/SearchUrlManager.ts`
 - Basic widget → `templates/BasicSearchWidget.tsx`
 - Widget with facets → `templates/SearchWithFacets.tsx`
 - Custom hook → `templates/CustomSearchHook.ts`
-- Load more pagination → `LOAD-MORE-PAGINATION.md`
+- Load more → `LOAD-MORE-PAGINATION.md`
 
-### 📚 **Need Reference?**
-→ Read `REFERENCE.md` for TypeScript interfaces and API signatures
+**Need API reference?** `REFERENCE.md`
 
 ## Critical Rules
 
-### 1. Use `facetValue.id` NOT `.text`
+### 1. Facet values: use `.id` for valueId type, `.text` for text type
 ```typescript
-// ❌ facetValueId: facetValue.text
-// ✅ facetValueId: facetValue.id
+// Current codebase uses text-based encoding:
+actions.onFacetClick({
+  facetId, facetValueText: fv.text, type: 'text', checked, facetIndex
+});
+// If using valueId-based:
+// facetValueId: fv.id, type: 'valueId'
 ```
 
-### 2. All 5 `onFacetClick` Parameters Required
+### 2. All required `onFacetClick` parameters
 ```typescript
 actions.onFacetClick({
-  facetId, facetValueId, type: 'valueId', checked, facetIndex
+  facetId, facetValueText, type: 'text', checked, facetIndex
 });
 ```
 
-### 3. Sync SDK → URL
+### 3. Always sync SDK + URL
 ```typescript
 actions.onKeyphraseChange({ keyphrase: term });
-if (router.isReady) await searchUrlManager.setSearchTerm(router, term);
+await searchUrlManager.setSearchTerm(router, pathname, searchParams, term);
 ```
+
+### 4. Use clear-and-reapply for facet changes
+After URL update, clear SDK filters and re-apply all facets from `searchUrlManager.getCurrentState()`. See `FACETS.md`.
+
+### 5. Mixed-size load more needs explicit offset math
+If `initialPageSize !== loadMorePageSize`, do not use `page * currentLimit` — see `LOAD-MORE-PAGINATION.md`.
+
+### 6. Client-side visibility filtering must not imply backend exhaustion
+If current fetched results are hidden by a client-side filter like `hasVisibleKeyphraseMatch`, do not show no-results or disable pagination until backend results are exhausted.
+
+### 7. No conditional mount/unmount of widget sections
+Use CSS `hidden` toggle, not conditional rendering, for mutually exclusive sections inside a search widget. See `ANTI-PATTERNS.md` #11.
 
 ## Implementation Workflow
 
-1. **Setup** - Install packages, env vars, SearchProvider → `QUICK-START.md`
-2. **SearchUrlManager** - Create singleton with queue/debounce → `SEARCHURLMANAGER.md`
-3. **Basic Widget** - useSearchResults + controlled input + widget() HOC → `templates/BasicSearchWidget.tsx`
-4. **Add Facets** - Extract data, render UI, use `.id`, sync URL → `FACETS.md`
-5. **Pagination** - Calculate pages, handlePageChange, auto-reset verifies
-6. **Validate** - Run `scripts/validate-search-code.sh`, test checklist
+1. **Setup** — packages, env vars, SearchProvider → `QUICK-START.md`
+2. **SearchUrlManager** — App Router singleton with queue/debounce → `SEARCHURLMANAGER.md`
+3. **Basic widget** — useSearchResults + controlled input + widget() HOC → `templates/BasicSearchWidget.tsx`
+4. **Facets** — extract data, render UI, clear-and-reapply, sync URL → `FACETS.md`
+5. **Pagination** — offsets, mixed-size load-more → `LOAD-MORE-PAGINATION.md`
+6. **Validate** — `scripts/validate-search-code.sh`
 
-## Common Tasks & File References
+## File Reference
 
-| Task | Primary File | Supporting Files |
-|------|--------------|------------------|
+| Task | Primary File | Supporting |
+|------|-------------|------------|
 | Setup from scratch | `QUICK-START.md` | `templates/SearchProvider.tsx` |
-| Implement URL sync | `SEARCHURLMANAGER.md` | `templates/SearchUrlManager.ts` |
-| Add facets | `FACETS.md` | `templates/SearchWithFacets.tsx` |
-| Debug facet issues | `ANTI-PATTERNS.md` #1-2 | `scripts/validate-search-code.sh` |
-| Fix URL sync | `ANTI-PATTERNS.md` #3, #8 | `TROUBLESHOOTING.md` |
-| Code review | `ANTI-PATTERNS.md` (all 10) | `scripts/validate-search-code.sh` |
-| TypeScript types | `REFERENCE.md` | - |
-| Custom search hook | `templates/CustomSearchHook.ts` | - |
+| URL sync | `SEARCHURLMANAGER.md` | `templates/SearchUrlManager.ts` |
+| Facets | `FACETS.md` | `templates/SearchWithFacets.tsx` |
+| Debug facets | `ANTI-PATTERNS.md` #1-2 | `scripts/validate-search-code.sh` |
+| Debug URL | `ANTI-PATTERNS.md` #3 | `TROUBLESHOOTING.md` |
+| Code review | `ANTI-PATTERNS.md` | `scripts/validate-search-code.sh` |
+| TypeScript types | `REFERENCE.md` | — |
+| Custom hook | `templates/CustomSearchHook.ts` | — |
+| Load more | `LOAD-MORE-PAGINATION.md` | — |
 
-## Anti-Pattern Quick Reference
+## Validation
 
-**Run validation:** `bash scripts/validate-search-code.sh <file.tsx>`
+Run: `bash scripts/validate-search-code.sh <file.tsx>`
 
-**Top 5 bugs** (90% of issues):
-1. ❌ Using `facetValue.text` instead of `.id`
-2. ❌ Missing required `onFacetClick` parameters
-3. ❌ Skipping URL synchronization
-4. ❌ Not checking `router.isReady`
-5. ❌ Client-side filtering of results
+Top 5 bugs (90% of issues):
+1. Using wrong facet value property for facet type
+2. Missing required `onFacetClick` parameters
+3. Skipping URL synchronization
+4. Using Pages Router (`next/router`) instead of App Router (`next/navigation`)
+5. Conditional mount/unmount of widget sections instead of CSS toggle
 
-**Full list:** `ANTI-PATTERNS.md`
-
-## SearchUrlManager Auto-Behaviors
-
-**These methods auto-reset pagination to page 1:**
-- `setSearchTerm(router, term)`
-- `addFacet(router, facetId, valueId)`
-- `removeFacet(router, facetId, valueId)`
-- `setTab(router, tabId)`
-- `clearAllFacets(router)`
-- `clearAllFilters(router)`
-
-**This method does NOT reset:**
-- `setPage(router, page)` - Only updates page number
-
-Don't manually reset pagination - SearchUrlManager handles it automatically.
-
-## Load More / Cumulative Results Pattern
-
-**Implementation Strategy:**
-1.  **State**: Maintain `accumulatedResults` state in the widget.
-2.  **Effect**: Update state in `useEffect` when `results` change.
-3.  **Append**: If `offset > previousOffset`, append new results (`[...prev, ...new]`).
-4.  **Reset**: If `offset === 0`, replace results (`[...new]`).
-5.  **Deduplicate**: Use `new Set(prev.map(i => i.id))` to prevent duplicates.
-
-**Critical: Preventing Infinite Loops**
-When resetting to page 1 (facet change), React can cycle infinitely if not guarded.
-```typescript
-// ✅ Correct Guard Pattern
-if (offset === 0 && previousOffsetRef.current !== 0) {
-   // Only reset when GOING TO page 1 from another page
-   setAccumulatedResults(results);
-} else if (offset === 0 && results.length !== prevLenRef.current) {
-   // Or if content changed while staying on page 1
-   setAccumulatedResults(results);
-}
-```
-
-**Deep Linking Support (Page > 1)**
-When a user lands on `?p=3`:
-1.  **Initial Load**: Set `limit = 3 * itemsPerPage` to fetch pages 1-3 at once.
-2.  **Subsequent**: On next "Load More", switch back to `limit = itemsPerPage`.
-
-**Display Component**
-Use a specialized summary component that understands the difference:
--   **Standard**: "Showing 21-30 of 100"
--   **Cumulative**: "Showing 1-30 of 100" (Pass `accumulatedCount` prop)
-
-
-**Facets not filtering?**
-```typescript
-// Check 1: Using .id?
-console.log('Facet value:', facetValue.id); // Should use this
-
-// Check 2: All 5 params?
-actions.onFacetClick({
-  facetId, facetValueId, type, checked, facetIndex // All present?
-});
-
-// Check 3: URL updating?
-console.log('URL facets:', router.query.facets);
-```
-
-**URL not updating?**
-```typescript
-// Check 1: Router ready?
-console.log('Router ready:', router.isReady); // Must be true
-
-// Check 2: SearchUrlManager called?
-await searchUrlManager.setSearchTerm(router, term); // After actions
-
-// Check 3: Shallow routing?
-router.push({ ... }, undefined, { shallow: true }); // Required
-```
-
-**Back button broken?**
-```typescript
-// Check: Syncing on URL change?
-useEffect(() => {
-  if (!router.isReady) return;
-  searchUrlManager.syncFromUrl(router);
-}, [router.query, router.isReady]); // Must listen to router.query
-```
-
-## File Organization Reference
-
-```
-~/.claude/skills/sitecore-search/
-├── SKILL.md                    # This file - Start here
-├── QUICK-START.md              # Step-by-step setup guide
-├── SEARCHURLMANAGER.md         # URL sync implementation
-├── FACETS.md                   # Facet pattern library
-├── ANTI-PATTERNS.md            # 10 critical anti-patterns
-├── TROUBLESHOOTING.md          # Issue → solution mappings
-├── REFERENCE.md                # TypeScript interfaces & APIs
-├── templates/
-│   ├── SearchProvider.tsx      # Provider setup
-│   ├── SearchUrlManager.ts     # Singleton implementation
-│   ├── BasicSearchWidget.tsx   # Simple search widget
-│   ├── SearchWithFacets.tsx    # Widget with facets
-│   └── CustomSearchHook.ts     # Custom hook pattern
-└── scripts/
-    └── validate-search-code.sh # Anti-pattern checker
-```
-
-## Success Criteria
-
-Implementation is correct when:
-- ✅ Search returns results
-- ✅ Facets filter (using `facetValue.id`)
-- ✅ Pagination works and auto-resets
-- ✅ URL updates on all state changes
-- ✅ Browser back/forward works
-- ✅ Page refresh maintains state
-- ✅ Shareable URLs work
-- ✅ No console errors
-- ✅ No client-side filtering
-- ✅ Clear filters resets all 3 layers
-
-**Validation:** Run `scripts/validate-search-code.sh` - should pass all checks.
-
-## Next Steps
-
-1. **First time implementing?** → Read `QUICK-START.md`
-2. **Have an issue?** → Read `TROUBLESHOOTING.md`
-3. **Need code review?** → Read `ANTI-PATTERNS.md`
-4. **Need a template?** → Check `templates/` directory
-5. **Need reference?** → Read `REFERENCE.md`
-
----
-
-**Remember:** The 3 critical rules prevent 80% of bugs. Use `facetValue.id`, include all 5 parameters, sync SDK → URL.
+Full list + checklist: `ANTI-PATTERNS.md`

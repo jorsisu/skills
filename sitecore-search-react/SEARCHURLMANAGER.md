@@ -1,45 +1,40 @@
-# SearchUrlManager Implementation Guide
+# SearchUrlManager (App Router)
 
-Complete guide to implementing the SearchUrlManager singleton for URL state synchronization.
+Singleton that syncs search state (term, facets, pagination) with the URL for shareability, browser navigation, and persistence.
 
-## Why SearchUrlManager?
+**Full implementation:** `templates/SearchUrlManager.ts`
 
-**Problem:** Search state (term, facets, pagination) exists in memory. Page refresh or sharing links loses state.
+## Table of Contents
 
-**Solution:** Singleton that syncs search state ↔ URL for shareability, browser navigation, and persistence.
-
-## Core Responsibilities
-
-1. **Parse URL** → Extract search state on page load
-2. **Build URL** → Construct URL from current state
-3. **Sync State** → Keep SDK, URL, and components in sync
-4. **Auto-Reset** → Reset pagination on search/facet changes
-5. **Queue Updates** → Prevent race conditions
-6. **Debounce** → Optimize rapid state changes
+- [URL Schema](#url-schema)
+- [State Interfaces](#state-interfaces)
+- [Core Methods](#core-methods)
+- [Auto-Reset Behavior](#auto-reset-behavior)
+- [Queue & Debounce](#queue--debounce)
+- [Usage Patterns](#usage-patterns)
+- [Common Pitfalls](#common-pitfalls)
 
 ## URL Schema
 
 ```
-?q=search+term&page=2&tab=locations&facets=category%3Dnews%26type%3Darticle
+?q=search+term&p=2&facets=category%3Dnews%26type%3Darticle
 ```
 
-- `q` - Search term (URL encoded)
-- `page` - Page number (omitted if 1)
-- `tab` - Active tab (omitted if default)
-- `facets` - URLSearchParams string
+| Param | Description | Omitted when |
+|-------|-------------|-------------|
+| `q` | Search term (URL encoded) | Empty |
+| `p` | Page number | Page 1 |
+| `facets` | Nested URLSearchParams string | No facets |
 
-## Implementation
+Non-search params are preserved across updates.
 
-**Full template:** `templates/SearchUrlManager.ts`
-
-### State Interfaces
+## State Interfaces
 
 ```typescript
 interface SearchState {
   searchTerm?: string;
   page?: number;
-  tab?: string;
-  facets?: Record<string, string[]>;
+  facets?: Record<string, string[]>; // facetId -> selected values
 }
 
 interface SearchStateCallbacks {
@@ -47,181 +42,123 @@ interface SearchStateCallbacks {
   onPageNumberChange?: ({ page }: { page: number }) => void;
   onFacetClick?: (payload: {
     facetId: string;
-    facetValueId: string;
+    facetValueText?: string;
+    facetValueId?: string;
     checked: boolean;
-    type: 'valueId';
+    type: 'text' | 'valueId';
     facetIndex: number;
   }) => void;
   onClearFilters?: () => void;
-  setSearchTerm?: (term: string) => void;
+  onClearFacets?: () => void;  // Clears facets only, preserves search term
 }
 ```
 
-### Core Methods
+## Core Methods
 
-**initialize(router, callbacks)**
-- Parse URL into SearchState
-- Store callbacks for later use
-- Apply state to SDK via callbacks
-- Return parsed state
+All mutating methods take `(router: AppRouterInstance, pathname: string, searchParams: ReadonlyURLSearchParams, ...)`.
 
-**setSearchTerm(router, term)**
-- Update searchTerm in state
-- **Auto-reset** page to undefined
-- Call onPageNumberChange({ page: 1 })
-- Update URL with debouncing
+| Method | Signature (after common params) | Resets page? |
+|--------|--------------------------------|-------------|
+| `initialize` | `(searchParams, callbacks)` | N/A |
+| `syncFromUrl` | `(searchParams)` | N/A |
+| `setSearchTerm` | `(..., term)` | Yes + clears facets |
+| `addFacet` | `(..., facetId, value, options?)` | Yes |
+| `removeFacet` | `(..., facetId, value)` | Yes |
+| `setPage` | `(..., page)` | No |
+| `clearAllFilters` | `(...)` | Yes (clears everything) |
+| `clearFacets` | `(...)` | Yes (keeps search term) |
+| `getCurrentState` | `()` | N/A |
 
-**addFacet(router, facetId, valueId)**
-- Add value to facets[facetId] array
-- **Auto-reset** page to undefined
-- Call onPageNumberChange({ page: 1 })
-- Update URL immediately
+**`initialize(searchParams, callbacks)`** — Note: takes `searchParams` directly, NOT router. Parses URL, stores callbacks, applies state via callbacks, returns parsed `SearchState`.
 
-**removeFacet(router, facetId, valueId)**
-- Remove value from facets[facetId] array
-- **Auto-reset** page to undefined
-- Update URL immediately
+**`syncFromUrl(searchParams)`** — Takes `searchParams` directly. Compares URL state to internal state; applies diffs via callbacks. On facet changes, calls `onClearFacets` before re-applying.
 
-**setPage(router, page)**
-- Update page in state
-- Does NOT auto-reset other state
-- Update URL immediately
+**`addFacet(..., facetId, value, options?)`** — `options.allowMultiSelectWithinCategory` controls whether multiple values stack within the same facet category (default: single-select replaces previous value).
 
-**syncFromUrl(router)**
-- Parse current URL
-- Compare to internal state
-- Apply changes via callbacks if different
-
-**clearAllFilters(router)**
-- Clear searchTerm, facets, page, tab
-- Reset URL to clean state
+**`clearFacets` vs `clearAllFilters`** — `clearFacets` clears only facet selections (preserves search term). `clearAllFilters` clears everything: term, facets, and page.
 
 ## Auto-Reset Behavior
 
-**Methods that auto-reset pagination:**
-```typescript
-setSearchTerm()    // Reset to page 1
-addFacet()         // Reset to page 1
-removeFacet()      // Reset to page 1
-setTab()           // Reset to page 1
-clearAllFacets()   // Reset to page 1
-clearAllFilters()  // Reset to page 1
-```
+Methods that change what results are shown auto-reset pagination to page 1. New search/facet = new result set, so old page numbers are invalid.
 
-**Method that does NOT reset:**
-```typescript
-setPage()          // Only updates page number
-```
+`setSearchTerm` additionally clears all facets (state + SDK via `onClearFacets` callback).
 
-**Why?** New search = new results. Page 5 of "pediatric" isn't valid for "neurology".
+## Queue & Debounce
 
-## Queue System
+- **Queue:** Promise chain ensures sequential URL updates, preventing race conditions.
+- **Debounce:** `setSearchTerm` uses 100ms debounce. All other methods update immediately.
 
-**Problem:** Multiple async URL updates can race.
-
-**Solution:** Promise queue ensures sequential execution.
-
-```typescript
-private urlUpdateQueue: Promise<void> = Promise.resolve();
-
-private async updateUrl(router: NextRouter) {
-  this.urlUpdateQueue = this.urlUpdateQueue.then(async () => {
-    await router.push(
-      { pathname: router.pathname, query },
-      undefined,
-      { shallow: true, scroll: false }
-    );
-  });
-
-  return this.urlUpdateQueue;
-}
-```
-
-## Debouncing
-
-**Why?** Rapid typing triggers many URL updates.
-
-**Solution:** 100ms debounce for search term changes.
-
-```typescript
-const URL_UPDATE_DEBOUNCE_MS = 100;
-
-// Debounced for search term
-await this.updateUrl(router, false); // Uses debounce
-
-// Immediate for facets/pagination
-await this.updateUrl(router, true);  // No debounce
-```
+URL updates use `router.push(newUrl, { scroll: false })`.
 
 ## Usage Patterns
 
-### Initialization (useEffect on mount)
+All hooks from `next/navigation`:
 
 ```typescript
-useEffect(() => {
-  if (!router.isReady) return;
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+```
 
-  const initialState = searchUrlManager.initialize(router, {
+### Initialization
+
+```typescript
+const initializedRef = useRef(false);
+const router = useRouter();
+const searchParams = useSearchParams();
+const pathname = usePathname();
+
+useEffect(() => {
+  if (initializedRef.current) return;
+  initializedRef.current = true;
+
+  const initialState = searchUrlManager.initialize(searchParams, {
     onKeyphraseChange: ({ keyphrase }) => {
       actions.onKeyphraseChange({ keyphrase });
       setSearchTerm(keyphrase);
     },
     onPageNumberChange: ({ page }) => actions.onPageNumberChange({ page }),
     onFacetClick: (payload) => actions.onFacetClick(payload),
+    onClearFacets: () => actions.onClearFilters(),
     setSearchTerm: (term) => setSearchTerm(term),
   });
 
   if (initialState.searchTerm) {
     setSearchTerm(initialState.searchTerm);
   }
-}, [router.isReady]);
+}, []);
 ```
 
-### Sync on URL Change (back/forward button)
+### Sync on URL Change (back/forward)
 
 ```typescript
 useEffect(() => {
-  if (!router.isReady) return;
-  searchUrlManager.syncFromUrl(router);
-}, [router.query, router.isReady]);
+  searchUrlManager.syncFromUrl(searchParams);
+}, [searchParams]);
 ```
 
 ### Search Submission
 
 ```typescript
-const handleSearch = async (e: React.FormEvent) => {
-  e.preventDefault();
-
-  // 1. Update SDK
-  actions.onKeyphraseChange({ keyphrase: searchTerm });
-
-  // 2. Update URL (auto-resets page)
-  if (router.isReady) {
-    await searchUrlManager.setSearchTerm(router, searchTerm);
-  }
+const handleSearch = async (term: string) => {
+  actions.onKeyphraseChange({ keyphrase: term });
+  await searchUrlManager.setSearchTerm(router, pathname, searchParams, term);
 };
 ```
 
 ### Facet Selection
 
 ```typescript
-const handleFacetClick = async (facetId: string, valueId: string, checked: boolean) => {
-  // 1. Update SDK
+const handleFacetClick = async (
+  facetId: string, valueText: string, checked: boolean
+) => {
   actions.onFacetClick({
-    facetId,
-    facetValueId: valueId,
-    type: 'valueId',
-    checked,
-    facetIndex: 0,
+    facetId, facetValueText: valueText,
+    type: 'text', checked, facetIndex: 0,
   });
 
-  // 2. Update URL (auto-resets page)
-  if (router.isReady) {
-    if (checked) {
-      await searchUrlManager.addFacet(router, facetId, valueId);
-    } else {
-      await searchUrlManager.removeFacet(router, facetId, valueId);
-    }
+  if (checked) {
+    await searchUrlManager.addFacet(router, pathname, searchParams, facetId, valueText);
+  } else {
+    await searchUrlManager.removeFacet(router, pathname, searchParams, facetId, valueText);
   }
 };
 ```
@@ -230,113 +167,19 @@ const handleFacetClick = async (facetId: string, valueId: string, checked: boole
 
 ```typescript
 const handlePageChange = async (page: number) => {
-  // 1. Update SDK
   actions.onPageNumberChange({ page });
-
-  // 2. Update URL (no auto-reset)
-  if (router.isReady) {
-    await searchUrlManager.setPage(router, page);
-  }
+  await searchUrlManager.setPage(router, pathname, searchParams, page);
 };
-```
-
-## Critical Rules
-
-### ✅ Always Check router.isReady
-
-```typescript
-if (!router.isReady) return;
-await searchUrlManager.setSearchTerm(router, term);
-```
-
-### ✅ Use Shallow Routing
-
-```typescript
-router.push(
-  { pathname, query },
-  undefined,
-  { shallow: true, scroll: false } // CRITICAL
-);
-```
-
-### ✅ Initialize Once
-
-```typescript
-useEffect(() => {
-  if (!router.isReady) return;
-  searchUrlManager.initialize(router, callbacks);
-}, [router.isReady]); // ONLY on router.isReady change
-```
-
-### ✅ Sync on URL Changes
-
-```typescript
-useEffect(() => {
-  if (!router.isReady) return;
-  searchUrlManager.syncFromUrl(router);
-}, [router.query, router.isReady]); // Listen to query changes
 ```
 
 ## Common Pitfalls
 
-### ❌ Not Checking router.isReady
+**Do not use `router.isReady`** — App Router has no `isReady`. Use `initializedRef` pattern for one-time init.
 
-```typescript
-// WRONG - router.query is empty
-const term = router.query.q;
+**Do not pass router object to `initialize` or `syncFromUrl`** — These take `searchParams` directly.
 
-// CORRECT
-if (router.isReady) {
-  const term = router.query.q;
-}
-```
+**Do not manually reset pagination** — `setSearchTerm`, `addFacet`, `removeFacet` auto-reset. Calling `onPageNumberChange` yourself will double-fire.
 
-### ❌ Missing Shallow Routing
+**Do not use `router.push({ pathname, query }, undefined, { shallow: true })`** — That's Pages Router. App Router uses `router.push(urlString, { scroll: false })`.
 
-```typescript
-// WRONG - Full page reload
-router.push({ pathname, query });
-
-// CORRECT - No reload
-router.push({ pathname, query }, undefined, { shallow: true });
-```
-
-### ❌ Manual Pagination Reset
-
-```typescript
-// WRONG - Don't manually reset
-actions.onPageNumberChange({ page: 1 });
-await searchUrlManager.setSearchTerm(router, term);
-
-// CORRECT - Auto-resets
-await searchUrlManager.setSearchTerm(router, term);
-```
-
-## Complete Template
-
-See `templates/SearchUrlManager.ts` for full implementation with:
-- Singleton pattern
-- State interfaces
-- All core methods
-- Queue system
-- Debouncing
-- Auto-reset logic
-- URL parsing/building
-- State application
-
-## Testing Checklist
-
-- [ ] URL updates on search
-- [ ] URL updates on facet changes
-- [ ] URL updates on pagination
-- [ ] Browser back button works
-- [ ] Browser forward button works
-- [ ] Page refresh maintains state
-- [ ] Shared URLs work
-- [ ] Pagination resets on search
-- [ ] Pagination resets on facet changes
-- [ ] Pagination does NOT reset on page change
-
----
-
-**Key Takeaway:** SearchUrlManager is the single source of truth for URL ↔ state synchronization. Auto-resets pagination when needed, queues updates, debounces rapid changes.
+**Sync effect depends on `[searchParams]`** — Not `[router.query]`. App Router provides reactive `searchParams` from `useSearchParams()`.

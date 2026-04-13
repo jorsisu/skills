@@ -2,6 +2,20 @@
 
 TypeScript interfaces, API signatures, and quick reference for Sitecore Search.
 
+## Table of Contents
+
+- [Package Imports](#package-imports)
+- [TypeScript Interfaces](#typescript-interfaces)
+- [useSearchResults Hook](#usesearchresults-hook)
+- [SearchUrlManager API](#searchurlmanager-api)
+- [widget() HOC](#widget-hoc)
+- [PageController](#pagecontroller)
+- [WidgetsProvider](#widgetsprovider)
+- [Common Calculations](#common-calculations)
+- [URL Schema](#url-schema)
+- [Environment Variables](#environment-variables)
+- [Auto-Reset Behavior](#auto-reset-behavior)
+
 ## Package Imports
 
 ```typescript
@@ -9,9 +23,10 @@ TypeScript interfaces, API signatures, and quick reference for Sitecore Search.
 import { widget, useSearchResults, PageController, WidgetsProvider } from '@sitecore-search/react';
 import { WidgetDataType, Environment } from '@sitecore-search/data';
 
-// Next.js
-import { useRouter } from 'next/router';
-import type { NextRouter } from 'next/router';
+// Next.js (App Router)
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+import type { AppRouterInstance } from 'next/dist/shared/lib/app-router-context.shared-runtime';
+import type { ReadonlyURLSearchParams } from 'next/navigation';
 ```
 
 ## TypeScript Interfaces
@@ -22,8 +37,7 @@ import type { NextRouter } from 'next/router';
 interface SearchState {
   searchTerm?: string;
   page?: number;
-  tab?: string;
-  facets?: Record<string, string[]>;
+  facets?: Record<string, string[]>; // facetId -> array of selected text values
 }
 ```
 
@@ -34,9 +48,8 @@ interface SearchStateCallbacks {
   onKeyphraseChange?: ({ keyphrase }: { keyphrase: string }) => void;
   onPageNumberChange?: ({ page }: { page: number }) => void;
   onFacetClick?: (payload: FacetClickPayload) => void;
-  onRemoveFilter?: (payload: RemoveFilterPayload) => void;
   onClearFilters?: () => void;
-  setSearchTerm?: (term: string) => void;
+  onClearFacets?: () => void;
 }
 ```
 
@@ -44,11 +57,12 @@ interface SearchStateCallbacks {
 
 ```typescript
 interface FacetClickPayload {
-  facetId: string;        // REQUIRED - Facet identifier
-  facetValueId: string;   // REQUIRED - Use facetValue.id
-  type: 'valueId' | 'text'; // REQUIRED - Usually 'valueId'
-  checked: boolean;       // REQUIRED - true=select, false=deselect
-  facetIndex: number;     // REQUIRED - Position in facets array
+  facetId: string;              // REQUIRED - Facet identifier
+  facetValueText?: string;      // Text-based value (current codebase strategy)
+  facetValueId?: string;        // ID-based value (for compatibility)
+  type: 'text' | 'valueId';    // REQUIRED - 'text' in current codebase
+  checked: boolean;             // REQUIRED - true=select, false=deselect
+  facetIndex: number;           // REQUIRED - Position in facets array
 }
 ```
 
@@ -77,8 +91,8 @@ interface Facet {
 }
 
 interface FacetValue {
-  id: string;              // Use this for facetValueId
-  text: string;            // Display label
+  id: string;              // Internal identifier
+  text: string;            // Display label — used as filter value in text-based strategy
   count: number;           // Number of results
 }
 ```
@@ -158,10 +172,11 @@ actions.onPageNumberChange({ page: 2 });
 #### onFacetClick
 
 ```typescript
+// Text-based (current codebase strategy)
 actions.onFacetClick({
   facetId: string,
-  facetValueId: string,  // Use facetValue.id
-  type: 'valueId',
+  facetValueText: string,  // Use facetValue.text
+  type: 'text',
   checked: boolean,
   facetIndex: number,
 });
@@ -169,8 +184,8 @@ actions.onFacetClick({
 // Example
 actions.onFacetClick({
   facetId: 'category',
-  facetValueId: 'news',
-  type: 'valueId',
+  facetValueText: 'News',
+  type: 'text',
   checked: true,
   facetIndex: 0,
 });
@@ -234,11 +249,9 @@ const offset = queryResult.data?.offset || 0;
 
 ```typescript
 import { searchUrlManager } from '@/atoms/search/utils/searchUrlManager';
-
-// Or create instance
-import { SearchUrlManager } from '@/atoms/search/utils/searchUrlManager';
-const manager = SearchUrlManager.getInstance();
 ```
+
+Singleton instance. All mutating methods require App Router args: `router: AppRouterInstance`, `pathname: string`, `searchParams: ReadonlyURLSearchParams`.
 
 ### Methods
 
@@ -246,15 +259,17 @@ const manager = SearchUrlManager.getInstance();
 
 ```typescript
 initialize(
-  router: NextRouter,
+  searchParams: ReadonlyURLSearchParams,
   callbacks: SearchStateCallbacks
 ): SearchState;
 
 // Example
-const initialState = searchUrlManager.initialize(router, {
+const initialState = searchUrlManager.initialize(searchParams, {
   onKeyphraseChange: ({ keyphrase }) => actions.onKeyphraseChange({ keyphrase }),
   onPageNumberChange: ({ page }) => actions.onPageNumberChange({ page }),
   onFacetClick: (payload) => actions.onFacetClick(payload),
+  onClearFilters: () => actions.onClearFilters(),
+  onClearFacets: () => { /* clear SDK, re-apply keyphrase */ },
 });
 ```
 
@@ -262,93 +277,94 @@ const initialState = searchUrlManager.initialize(router, {
 
 ```typescript
 async setSearchTerm(
-  router: NextRouter,
+  router: AppRouterInstance,
+  pathname: string,
+  searchParams: ReadonlyURLSearchParams,
   term: string
 ): Promise<void>;
 
-// Auto-resets pagination to page 1
-await searchUrlManager.setSearchTerm(router, 'search term');
+// Auto-resets pagination to page 1, clears facets
+await searchUrlManager.setSearchTerm(router, pathname, searchParams, 'search term');
 ```
 
 #### addFacet
 
 ```typescript
 async addFacet(
-  router: NextRouter,
+  router: AppRouterInstance,
+  pathname: string,
+  searchParams: ReadonlyURLSearchParams,
   facetId: string,
-  facetValueId: string
+  facetValueText: string,
+  options?: { allowMultiSelectWithinCategory?: boolean }
 ): Promise<void>;
 
 // Auto-resets pagination to page 1
-await searchUrlManager.addFacet(router, 'category', 'news');
+await searchUrlManager.addFacet(router, pathname, searchParams, 'category', 'News');
 ```
 
 #### removeFacet
 
 ```typescript
 async removeFacet(
-  router: NextRouter,
+  router: AppRouterInstance,
+  pathname: string,
+  searchParams: ReadonlyURLSearchParams,
   facetId: string,
-  facetValueId: string
+  facetValueText: string
 ): Promise<void>;
 
 // Auto-resets pagination to page 1
-await searchUrlManager.removeFacet(router, 'category', 'news');
+await searchUrlManager.removeFacet(router, pathname, searchParams, 'category', 'News');
 ```
 
 #### setPage
 
 ```typescript
 async setPage(
-  router: NextRouter,
+  router: AppRouterInstance,
+  pathname: string,
+  searchParams: ReadonlyURLSearchParams,
   page: number
 ): Promise<void>;
 
 // Does NOT reset other state
-await searchUrlManager.setPage(router, 2);
+await searchUrlManager.setPage(router, pathname, searchParams, 2);
 ```
 
-#### setTab
+#### clearFacets
 
 ```typescript
-async setTab(
-  router: NextRouter,
-  tab: string
+async clearFacets(
+  router: AppRouterInstance,
+  pathname: string,
+  searchParams: ReadonlyURLSearchParams
 ): Promise<void>;
 
-// Auto-resets pagination to page 1
-await searchUrlManager.setTab(router, 'locations');
-```
-
-#### clearAllFacets
-
-```typescript
-async clearAllFacets(
-  router: NextRouter
-): Promise<void>;
-
-// Clears facets, resets pagination
-await searchUrlManager.clearAllFacets(router);
+// Clears facets only, preserves keyphrase. Resets pagination.
+await searchUrlManager.clearFacets(router, pathname, searchParams);
 ```
 
 #### clearAllFilters
 
 ```typescript
 async clearAllFilters(
-  router: NextRouter
+  router: AppRouterInstance,
+  pathname: string,
+  searchParams: ReadonlyURLSearchParams
 ): Promise<void>;
 
-// Clears search term, facets, tab, pagination
-await searchUrlManager.clearAllFilters(router);
+// Clears search term, facets, and pagination
+await searchUrlManager.clearAllFilters(router, pathname, searchParams);
 ```
 
 #### syncFromUrl
 
 ```typescript
-syncFromUrl(router: NextRouter): void;
+syncFromUrl(searchParams: ReadonlyURLSearchParams): void;
 
 // Call on URL changes (back/forward button)
-searchUrlManager.syncFromUrl(router);
+searchUrlManager.syncFromUrl(searchParams);
 ```
 
 #### getCurrentState
@@ -421,7 +437,7 @@ const totalItems = queryResult.data?.total_item || 0;
 const limit = queryResult.data?.limit || 24;
 const offset = queryResult.data?.offset || 0;
 
-const currentPage = Math.floor(offset / limit) + 1;
+const currentPage = parseInt(searchParams.get('p') || '1', 10);
 const totalPages = Math.ceil(totalItems / limit);
 
 const start = offset + 1;
@@ -445,13 +461,14 @@ const facetIndex = getFacetIndex(queryResult.data?.facet || [], 'category');
 
 ```typescript
 const getSelectedFacetValues = (
-  router: NextRouter,
+  searchParams: ReadonlyURLSearchParams,
   facetId: string
 ): string[] => {
-  if (!router.isReady || !router.query.facets) return [];
+  const facetsParam = searchParams.get('facets');
+  if (!facetsParam) return [];
 
   try {
-    const params = new URLSearchParams(router.query.facets as string);
+    const params = new URLSearchParams(facetsParam);
     return Array.from(params.entries())
       .filter(([id]) => id === facetId)
       .map(([, value]) => value);
@@ -461,30 +478,29 @@ const getSelectedFacetValues = (
 };
 
 // Usage
-const selectedCategories = getSelectedFacetValues(router, 'category');
+const selectedCategories = getSelectedFacetValues(searchParams, 'category');
 ```
 
 ## URL Schema
 
 ```
-?q=search+term&page=2&tab=locations&facets=category%3Dnews%26type%3Darticle
+?q=search+term&p=2&facets=category%3DNews%26type%3Darticle
 ```
 
 **Parameters:**
 - `q` - Search term (URL encoded)
-- `page` - Page number (1-indexed, omitted if 1)
-- `tab` - Active tab (omitted if default)
-- `facets` - URLSearchParams string (facetId=value pairs)
+- `p` - Page number (1-indexed, omitted if 1)
+- `facets` - URLSearchParams string (facetId=textValue pairs)
 
-**Facets encoding:**
+**Facets encoding (text-based):**
 ```typescript
-// State: { category: ['news', 'events'], location: ['chicago'] }
-// URL: facets=category%3Dnews%26category%3Devents%26location%3Dchicago
+// State: { category: ['News', 'Events'], location: ['Chicago'] }
+// URL: facets=category%3DNews%26category%3DEvents%26location%3DChicago
 
 const params = new URLSearchParams();
-params.append('category', 'news');
-params.append('category', 'events');
-params.append('location', 'chicago');
+params.append('category', 'News');
+params.append('category', 'Events');
+params.append('location', 'Chicago');
 const facetsString = params.toString();
 ```
 
@@ -506,8 +522,7 @@ NEXT_PUBLIC_SEARCH_SOURCE_ID=your_source_id
 - `searchUrlManager.setSearchTerm()`
 - `searchUrlManager.addFacet()`
 - `searchUrlManager.removeFacet()`
-- `searchUrlManager.setTab()`
-- `searchUrlManager.clearAllFacets()`
+- `searchUrlManager.clearFacets()`
 - `searchUrlManager.clearAllFilters()`
 
 **Method that does NOT reset:**

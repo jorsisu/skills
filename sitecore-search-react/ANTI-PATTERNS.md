@@ -2,7 +2,23 @@
 
 **MUST AVOID** patterns that cause bugs in Sitecore Search implementations. Documented from real production issues.
 
-> ⚠️ **These are the #1 source of bugs.** Review before coding.
+> **These are the #1 source of bugs.** Review before coding.
+
+## Table of Contents
+
+1. [Using Wrong Facet Property for Your Encoding Type](#anti-pattern-1-using-wrong-facet-property-for-your-encoding-type) - VERY HIGH
+2. [Missing Required onFacetClick Parameters](#anti-pattern-2-missing-required-onfacetclick-parameters) - HIGH
+3. [Skipping URL Synchronization](#anti-pattern-3-skipping-url-synchronization) - HIGH
+4. [Client-Side Filtering of Results](#anti-pattern-4-client-side-filtering-of-results) - MEDIUM
+5. [Multiple widget() Wrappers for Same rfkId](#anti-pattern-5-multiple-widget-wrappers-for-same-rfkid) - MEDIUM
+6. [Uncontrolled Search Inputs](#anti-pattern-6-uncontrolled-search-inputs) - MEDIUM
+7. [Manual Pagination Reset](#anti-pattern-7-manual-pagination-reset) - LOW
+8. [Using Pages Router Instead of App Router](#anti-pattern-8-using-pages-router-instead-of-app-router) - LOW
+9. [Incomplete Clear Filters Implementation](#anti-pattern-9-incomplete-clear-filters-implementation) - LOW
+10. [Triggering Full Navigation on Search URL Updates](#anti-pattern-10-triggering-full-navigation-on-search-url-updates) - LOW
+11. [Conditional Mount/Unmount of Widget Sections](#anti-pattern-11-conditional-mountunmount-of-widget-sections) - VERY HIGH
+
+---
 
 ## Validation
 
@@ -11,44 +27,65 @@ Run automated check:
 bash scripts/validate-search-code.sh <your-file.tsx>
 ```
 
-## Anti-Pattern #1: Using facetValue.text Instead of facetValue.id
+---
 
-**Bug frequency:** 🔴 VERY HIGH (40% of all issues)
+## Anti-Pattern #1: Using Wrong Facet Property for Your Encoding Type
 
-### ❌ WRONG
+**Bug frequency:** VERY HIGH (40% of all issues)
+
+The codebase currently uses **text-based encoding** (`facetValueText` + `type: 'text'`). The critical rule is: match the property to your encoding type. Using `.id` with `type: 'text'` or `.text` with `type: 'valueId'` causes silent filtering failures.
+
+### WRONG
 
 ```typescript
-const handleFacetClick = (facetValue) => {
-  actions.onFacetClick({
-    facetId: 'category',
-    facetValueId: facetValue.text,  // ← BUG: Using .text
-    type: 'valueId',
-    checked: true,
-    facetIndex: 0,
-  });
-};
+// Text-based encoding but passing .id
+actions.onFacetClick({
+  facetId: 'category',
+  facetValueText: facetValue.id,  // BUG: .id doesn't match text encoding
+  type: 'text',
+  checked: true,
+  facetIndex: 0,
+});
+
+// ID-based encoding but passing .text
+actions.onFacetClick({
+  facetId: 'category',
+  facetValueId: facetValue.text,  // BUG: .text doesn't match valueId encoding
+  type: 'valueId',
+  checked: true,
+  facetIndex: 0,
+});
 ```
 
-### ✅ CORRECT
+### CORRECT
 
 ```typescript
-const handleFacetClick = (facetValue) => {
-  actions.onFacetClick({
-    facetId: 'category',
-    facetValueId: facetValue.id,  // ← Use .id for valueId facets
-    type: 'valueId',
-    checked: true,
-    facetIndex: 0,
-  });
-};
+// Current codebase: text-based encoding
+actions.onFacetClick({
+  facetId: 'category',
+  facetValueText: facetValue.text,  // .text for text encoding
+  type: 'text',
+  checked: true,
+  facetIndex: 0,
+});
+
+// If using ID-based encoding (Sitecore recommended):
+actions.onFacetClick({
+  facetId: 'category',
+  facetValueId: facetValue.id,  // .id for valueId encoding
+  type: 'valueId',
+  checked: true,
+  facetIndex: 0,
+});
 ```
 
 ### Why This Matters
 
 - `facetValue.text` = Display label ("Pediatric Care")
 - `facetValue.id` = API identifier ("pediatric_care")
-- Sitecore Search API expects `facetValue.id`
-- Using `.text` causes facets to **fail silently** (no error, just doesn't filter)
+- Mismatching property and type causes facets to **fail silently** (no error, just doesn't filter)
+- The `type` field tells the SDK how to interpret the value — it must match
+- See `searchUrlManager.ts` header comments for switching between encodings
 
 ### How to Fix
 
@@ -56,21 +93,26 @@ const handleFacetClick = (facetValue) => {
 const facet = queryResult.data?.facet?.find(f => f.name === 'category');
 const facetValues = facet?.value || [];
 
+// Current codebase pattern (text-based):
 facetValues.map((fv) => (
   <Checkbox
     key={fv.id}
-    onChange={() => handleFacetClick(fv.id)}  // Pass .id
+    onChange={() => onFacetClick({
+      facetId: 'category',
+      facetValueText: fv.text,  // Pass .text for URL + SDK
+      checked: true,
+    })}
   >
-    {fv.text}  {/* Display .text */}
+    {fv.text}
   </Checkbox>
 ));
 ```
 
 ### Detection
 
-**Validation script checks:**
 ```bash
-grep -n "facetValueId.*\.text" file.tsx
+# Check for mismatched property/type combinations
+grep -n "facetValueId.*\.text\|facetValueText.*\.id" file.tsx
 # Should return nothing
 ```
 
@@ -78,28 +120,28 @@ grep -n "facetValueId.*\.text" file.tsx
 
 ## Anti-Pattern #2: Missing Required onFacetClick Parameters
 
-**Bug frequency:** 🟠 HIGH (25% of issues)
+**Bug frequency:** HIGH (25% of issues)
 
-### ❌ WRONG
+### WRONG
 
 ```typescript
 actions.onFacetClick({
   facetId: 'category',
-  facetValueId: valueId,
+  facetValueText: valueText,
   checked: true,
   // Missing: type, facetIndex
 });
 ```
 
-### ✅ CORRECT
+### CORRECT
 
 ```typescript
 actions.onFacetClick({
   facetId: 'category',
-  facetValueId: valueId,
-  type: 'valueId',      // REQUIRED
+  facetValueText: valueText,
+  type: 'text',       // REQUIRED
   checked: true,
-  facetIndex: 0,        // REQUIRED
+  facetIndex: 0,       // REQUIRED
 });
 ```
 
@@ -108,29 +150,32 @@ actions.onFacetClick({
 | Parameter | Type | Purpose | Common Value |
 |-----------|------|---------|--------------|
 | `facetId` | string | Facet identifier | 'category', 'location' |
-| `facetValueId` | string | **Use `.id` not `.text`** | 'news', 'chicago' |
-| `type` | 'valueId' \| 'text' | Facet type | 'valueId' (most common) |
+| `facetValueText` | string | **Text-based** facet value | 'News', 'Chicago' |
+| `facetValueId` | string | **ID-based** facet value (alternative) | 'news', 'chicago' |
+| `type` | 'text' \| 'valueId' | Must match which property you use | 'text' (current codebase) |
 | `checked` | boolean | Select/deselect | true/false |
 | `facetIndex` | number | Position in array | 0, 1, 2... |
 
 ### Detection
 
-**Validation script checks:**
 ```typescript
-// All 5 must be present
-const required = ['facetId', 'facetValueId', 'type', 'checked', 'facetIndex'];
+// All 5 must be present (facetValueText OR facetValueId, plus type, checked, facetIndex)
+const required = ['facetId', 'type', 'checked', 'facetIndex'];
+// Plus one of: facetValueText, facetValueId
 ```
 
 ---
 
 ## Anti-Pattern #3: Skipping URL Synchronization
 
-**Bug frequency:** 🟠 HIGH (20% of issues)
+**Bug frequency:** HIGH (20% of issues)
 
-### ❌ WRONG - Only Updates SDK
+### WRONG - Only Updates SDK
 
 ```typescript
-const handleSearch = (term) => {
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+
+const handleSearch = (term: string) => {
   // Only updates Sitecore Search SDK
   actions.onKeyphraseChange({ keyphrase: term });
 
@@ -138,49 +183,52 @@ const handleSearch = (term) => {
 };
 ```
 
-### ✅ CORRECT - Updates Both SDK and URL
+### CORRECT - Updates Both SDK and URL
 
 ```typescript
-const handleSearch = async (term) => {
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+
+const router = useRouter();
+const pathname = usePathname();
+const searchParams = useSearchParams();
+
+const handleSearch = async (term: string) => {
   // 1. Update SDK
   actions.onKeyphraseChange({ keyphrase: term });
 
   // 2. Update URL for shareability
-  if (router.isReady) {
-    await searchUrlManager.setSearchTerm(router, term);
-  }
+  await searchUrlManager.setSearchTerm(router, pathname, searchParams, term);
 };
 ```
 
 ### Impact
 
 **Without URL sync:**
-- ❌ Users can't share search results
-- ❌ Browser back button breaks
-- ❌ Page refresh loses filters
-- ❌ Bookmarks don't work
+- Users can't share search results
+- Browser back button breaks
+- Page refresh loses filters
+- Bookmarks don't work
 
 **With URL sync:**
-- ✅ Shareable links with filters
-- ✅ Browser navigation works
-- ✅ State persists on refresh
-- ✅ Bookmarkable searches
+- Shareable links with filters
+- Browser navigation works
+- State persists on refresh
+- Bookmarkable searches
 
 ### Detection
 
-**Validation script checks:**
 ```bash
 # After actions.onKeyphraseChange, must have searchUrlManager call
-grep -A3 "onKeyphraseChange" | grep "searchUrlManager"
+grep -A5 "onKeyphraseChange" file.tsx | grep "searchUrlManager"
 ```
 
 ---
 
 ## Anti-Pattern #4: Client-Side Filtering of Results
 
-**Bug frequency:** 🟡 MEDIUM (15% of issues)
+**Bug frequency:** MEDIUM (15% of issues)
 
-### ❌ WRONG - Manual Filtering
+### WRONG - Manual Filtering
 
 ```typescript
 const { queryResult } = useSearchResults();
@@ -194,7 +242,7 @@ const filteredContent = content.filter(item =>
 return filteredContent.map(item => <ResultCard {...item} />);
 ```
 
-### ✅ CORRECT - Server-Side Filtering
+### CORRECT - Server-Side Filtering
 
 ```typescript
 const { queryResult } = useSearchResults();
@@ -222,9 +270,73 @@ actions.onFacetClick({ /* ... */ });  // API filters server-side
 // Results automatically update
 ```
 
+### Mitigation: When Client-Side Filtering Is Unavoidable
+
+Sometimes client-side filtering is necessary (e.g., `hasVisibleKeyphraseMatch` hides results where the search term doesn't appear in any rendered field). When this exists, three things break:
+
+**1. False no-results / pagination dead-end:**
+
+```typescript
+// API page 1 returns 16 items, client filter shows 0
+// page 3 still contains real visible hits
+
+// WRONG — treat current visible page as exhaustion
+const isNoResults = !isLoading && visibleResults.length === 0;
+hasMore={
+  accumulatedResults.length < totalItems &&
+  visibleResults.length >= accumulatedResults.length
+}
+// This can hide pagination and show empty state too early
+
+// CORRECT — backend exhaustion stays tied to fetched/raw totals
+const hasMoreResults = accumulatedResults.length < totalItems;
+const isAutoLoadingMore =
+  !isLoading &&
+  visibleResults.length === 0 &&
+  accumulatedResults.length > 0 &&
+  hasMoreResults;
+
+const isNoResults =
+  !isLoading && !isAutoLoadingMore && visibleResults.length === 0;
+
+<ResultsList
+  results={visibleResults}
+  isLoading={isLoading || isAutoLoadingMore}
+  hasMore={hasMoreResults}
+/>
+```
+
+**2. Facet counts reflect API totals, not visible results:**
+
+```typescript
+// WRONG — uses API facet counts directly
+const allCount = baselineTotalItems ?? totalItems;
+// Shows "All (22)" when only 1 result is visible
+
+// CORRECT — recompute from visible results when filtering is active
+const isClientFiltering = visibleResults.length < accumulatedResults.length;
+
+const allCount = isClientFiltering
+  ? visibleResults.length
+  : (baselineTotalItems ?? totalItems);
+
+// Recount facet options from visibleResults, remove facets with 0 visible
+const adjustedOptions = rawFilterOptions
+  .map((opt) => ({ ...opt, count: visibleCountsByType.get(opt.label) || 0 }))
+  .filter((opt) => opt.count > 0);
+```
+
+**3. Debugging stops too early:**
+
+- Wrong conclusion: "page is not indexed"
+- Actual issue: current page is all false positives, later offsets contain valid hits
+
+Check later offsets in the Sitecore Search payload before concluding the document is missing.
+
+**Key principle:** When client-side filtering exists, use `visibleResults` for visible counts and facet display. Use backend totals/raw fetched counts for pagination exhaustion. Never infer "no results" from the current visible page alone.
+
 ### Detection
 
-**Validation script checks:**
 ```bash
 grep -n "\.filter(" file.tsx | grep "content"
 # Should only filter facet UI, not results
@@ -234,9 +346,9 @@ grep -n "\.filter(" file.tsx | grep "content"
 
 ## Anti-Pattern #5: Multiple widget() Wrappers for Same rfkId
 
-**Bug frequency:** 🟡 MEDIUM (10% of issues)
+**Bug frequency:** MEDIUM (10% of issues)
 
-### ❌ WRONG - Multiple Instances
+### WRONG - Multiple Instances
 
 ```typescript
 // File: SearchInput.tsx
@@ -250,7 +362,7 @@ export default widget(SearchResults, WidgetDataType.SEARCH_RESULTS, 'content');
 <SearchResults /> {/* Creates widget instance #2 - CONFLICT! */}
 ```
 
-### ✅ CORRECT - Single Widget Instance
+### CORRECT - Single Widget Instance
 
 ```typescript
 // File: SearchWidget.tsx
@@ -279,7 +391,6 @@ Multiple widget instances cause:
 
 ### Detection
 
-**Validation script checks:**
 ```bash
 # Count widget() wrappers with same rfkId
 grep -r "widget.*SEARCH_RESULTS.*content" | wc -l
@@ -290,9 +401,9 @@ grep -r "widget.*SEARCH_RESULTS.*content" | wc -l
 
 ## Anti-Pattern #6: Uncontrolled Search Inputs
 
-**Bug frequency:** 🟡 MEDIUM (8% of issues)
+**Bug frequency:** MEDIUM (8% of issues)
 
-### ❌ WRONG - Immediate Search on Type
+### WRONG - Immediate Search on Type
 
 ```typescript
 <input
@@ -303,7 +414,7 @@ grep -r "widget.*SEARCH_RESULTS.*content" | wc -l
 />
 ```
 
-### ✅ CORRECT - Controlled Input with Submit
+### CORRECT - Controlled Input with Submit
 
 ```typescript
 const [searchTerm, setSearchTerm] = useState('');
@@ -339,97 +450,138 @@ const [searchTerm, setSearchTerm] = useState('');
 
 ## Anti-Pattern #7: Manual Pagination Reset
 
-**Bug frequency:** 🟢 LOW (5% of issues)
+**Bug frequency:** LOW (5% of issues)
 
-### ❌ WRONG - Manual Reset
+### WRONG - Manual Reset
 
 ```typescript
-const handleFacetClick = async (facetId, valueId) => {
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+
+const handleFacetClick = async (facetId: string, valueText: string) => {
   // Manually resetting pagination
   actions.onPageNumberChange({ page: 1 });
 
-  actions.onFacetClick({ facetId, facetValueId: valueId, /* ... */ });
-  await searchUrlManager.addFacet(router, facetId, valueId);
+  actions.onFacetClick({ facetId, facetValueText: valueText, /* ... */ });
+  await searchUrlManager.addFacet(router, pathname, searchParams, facetId, valueText);
 };
 ```
 
-### ✅ CORRECT - Automatic Reset
+### CORRECT - Automatic Reset
 
 ```typescript
-const handleFacetClick = async (facetId, valueId) => {
-  actions.onFacetClick({ facetId, facetValueId: valueId, /* ... */ });
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+
+const handleFacetClick = async (facetId: string, valueText: string) => {
+  actions.onFacetClick({ facetId, facetValueText: valueText, /* ... */ });
 
   // SearchUrlManager auto-resets pagination
-  await searchUrlManager.addFacet(router, facetId, valueId);
+  await searchUrlManager.addFacet(router, pathname, searchParams, facetId, valueText);
 };
 ```
 
 ### SearchUrlManager Auto-Resets
 
 Methods that auto-reset pagination to page 1:
-- `setSearchTerm()`
-- `addFacet()` / `removeFacet()`
-- `setTab()`
-- `clearAllFacets()`
-- `clearAllFilters()`
+- `setSearchTerm(router, pathname, searchParams, term)`
+- `addFacet(router, pathname, searchParams, ...)` / `removeFacet(router, pathname, searchParams, ...)`
+- `clearAllFilters(router, pathname, searchParams)`
+- `clearFacets(router, pathname, searchParams)`
 
 Don't manually call `onPageNumberChange({ page: 1 })` - it's automatic.
 
 ---
 
-## Anti-Pattern #8: Skipping router.isReady Check
+## Anti-Pattern #8: Using Pages Router Instead of App Router
 
-**Bug frequency:** 🟢 LOW (3% of issues)
+**Bug frequency:** LOW (3% of issues)
 
-### ❌ WRONG - No Readiness Check
+This codebase uses Next.js App Router. All search components must use `next/navigation`, not `next/router`.
 
-```typescript
-const handleSearch = async (term) => {
-  actions.onKeyphraseChange({ keyphrase: term });
-
-  // BUG: Router might not be ready
-  await searchUrlManager.setSearchTerm(router, term);
-};
-```
-
-### ✅ CORRECT - Check Before URL Operations
+### WRONG - Pages Router Imports and Patterns
 
 ```typescript
-const handleSearch = async (term) => {
-  actions.onKeyphraseChange({ keyphrase: term });
+import { useRouter } from 'next/router';  // BUG: Pages Router
 
-  if (router.isReady) {
-    await searchUrlManager.setSearchTerm(router, term);
-  }
-};
+const router = useRouter();
+
+// BUG: router.query doesn't exist in App Router
+const searchTerm = router.query.q as string;
+
+// BUG: router.isReady doesn't exist in App Router
+useEffect(() => {
+  if (!router.isReady) return;
+  const initialState = searchUrlManager.initialize(router, callbacks);
+}, [router.isReady]);
+
+// BUG: Pages Router push signature
+router.push(
+  { pathname: '/search', query: { q: term } },
+  undefined,
+  { shallow: true }
+);
 ```
+
+### CORRECT - App Router Imports and Patterns
+
+```typescript
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+
+const router = useRouter();
+const searchParams = useSearchParams();
+const pathname = usePathname();
+
+// Read query params from useSearchParams()
+const searchTerm = searchParams.get('q') || '';
+
+// No isReady guard needed — searchParams is always available in App Router
+useEffect(() => {
+  const initialState = searchUrlManager.initialize(searchParams, {
+    onKeyphraseChange: ({ keyphrase }) => {
+      actions.onKeyphraseChange({ keyphrase });
+    },
+    onFacetClick: (payload) => {
+      actions.onFacetClick(payload);
+    },
+    // ...
+  });
+}, [searchParams]);
+
+// App Router push — string URL, options object
+router.push(`${pathname}?q=${encodeURIComponent(term)}`, { scroll: false });
+```
+
+### Key Differences
+
+| Pages Router | App Router |
+|-------------|------------|
+| `import { useRouter } from 'next/router'` | `import { useRouter, useSearchParams, usePathname } from 'next/navigation'` |
+| `router.query.q` | `searchParams.get('q')` |
+| `router.isReady` guard required | Always ready, no guard needed |
+| `router.push(urlObj, as, { shallow: true })` | `router.push(urlString, { scroll: false })` |
+| `router.pathname` | `usePathname()` |
 
 ### Why It Matters
 
-- `router.query` is empty until `router.isReady = true`
-- URL operations before ready cause:
-  - Lost query parameters
-  - Incorrect URL updates
-  - Silent failures
+- `next/router` is the Pages Router — it does not work in App Router components
+- `router.isReady` does not exist on the App Router's `useRouter()`
+- `router.query` does not exist — use `useSearchParams()` instead
+- `searchUrlManager` methods accept `(router, pathname, searchParams, ...)` — all three are separate hooks
 
-### Pattern for useEffect
+### Detection
 
-```typescript
-useEffect(() => {
-  if (!router.isReady) return;
-
-  // Safe to use router.query here
-  const initialState = searchUrlManager.initialize(router, callbacks);
-}, [router.isReady]);
+```bash
+# Should return nothing in search components
+grep -rn "from 'next/router'\|from \"next/router\"" src/
+grep -rn "router\.isReady\|router\.query" src/
 ```
 
 ---
 
 ## Anti-Pattern #9: Incomplete Clear Filters Implementation
 
-**Bug frequency:** 🟢 LOW (2% of issues)
+**Bug frequency:** LOW (2% of issues)
 
-### ❌ WRONG - Only Clears Local State
+### WRONG - Only Clears Local State
 
 ```typescript
 const handleClearFilters = () => {
@@ -437,18 +589,15 @@ const handleClearFilters = () => {
 };
 ```
 
-### ✅ CORRECT - Clear All Layers
+### CORRECT - Clear All Layers
 
 ```typescript
-const handleClearFilters = async () => {
-  // 1. Clear SDK state
-  actions.onClearFilters();
-  actions.onKeyphraseChange({ keyphrase: '' });
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 
+const handleClearFilters = async () => {
+  // 1. Clear SDK state (handled by searchUrlManager callback)
   // 2. Clear URL state
-  if (router.isReady) {
-    await searchUrlManager.clearAllFilters(router);
-  }
+  await searchUrlManager.clearAllFilters(router, pathname, searchParams);
 
   // 3. Clear local UI state
   setSearchTerm('');
@@ -459,52 +608,122 @@ const handleClearFilters = async () => {
 ### Three Layers of State
 
 1. **Sitecore Search SDK** - via `actions.onClearFilters()`
-2. **URL** - via `searchUrlManager.clearAllFilters()`
+2. **URL** - via `searchUrlManager.clearAllFilters(router, pathname, searchParams)`
 3. **Local Components** - via local React state setters
 
-All three MUST be cleared for complete reset.
+All three MUST be cleared for complete reset. The `searchUrlManager.clearAllFilters` callback triggers SDK clearing automatically (see `useSiteSearch` initialization).
 
 ---
 
-## Anti-Pattern #10: Forgetting Shallow Routing
+## Anti-Pattern #10: Triggering Full Navigation on Search URL Updates
 
-**Bug frequency:** 🟢 LOW (2% of issues)
+**Bug frequency:** LOW (2% of issues)
 
-### ❌ WRONG - Full Page Reload
+### WRONG - Full Page Navigation
 
 ```typescript
-router.push({
-  pathname: '/search',
-  query: { q: searchTerm },
-});
+import { useRouter } from 'next/navigation';
+
+// Forces server-side re-render and scroll to top
+router.push(`${pathname}?q=${searchTerm}`);
 ```
 
-### ✅ CORRECT - Shallow Routing
+### CORRECT - Client Navigation Without Scroll
 
 ```typescript
-router.push(
-  {
-    pathname: '/search',
-    query: { q: searchTerm },
-  },
-  undefined,
-  { shallow: true, scroll: false }
+import { useRouter } from 'next/navigation';
+
+// App Router client navigation is already "shallow" by default
+// (no server re-fetch for same route). Just disable scroll reset.
+router.push(`${pathname}?q=${searchTerm}`, { scroll: false });
+```
+
+### Why This Matters
+
+In App Router, `router.push` for the same route segment is already a client-side transition (no `shallow: true` needed like Pages Router). The key is passing `{ scroll: false }` to prevent scroll-to-top on every filter/search change.
+
+**Without `{ scroll: false }`:**
+- Page scrolls to top on every filter change
+- Jarring UX, user loses their place
+
+**With `{ scroll: false }`:**
+- No scroll reset
+- Smooth filter/search experience
+- Component state preserved
+
+### How SearchUrlManager Handles This
+
+The `searchUrlManager.updateUrl()` method already uses `router.push(newUrl, { scroll: false })` internally. If you bypass the manager and call `router.push` directly, always include `{ scroll: false }`.
+
+---
+
+## Anti-Pattern #11: Conditional Mount/Unmount of Widget Sections
+
+**Bug frequency:** VERY HIGH (causes cascading issues)
+
+### WRONG - Conditional Rendering (Mount/Unmount)
+
+```typescript
+const showLatestArticles = !hasSearchTerm && !hasActiveFacets;
+
+return (
+  <div>
+    {showLatestArticles && (
+      <div id="portal-target" />  {/* Mounts/unmounts */}
+    )}
+    {!showLatestArticles && (
+      <div>
+        <SearchResults />          {/* Mounts/unmounts */}
+      </div>
+    )}
+  </div>
 );
 ```
 
-### Impact
+### CORRECT - CSS Toggle (Always Mounted)
 
-**Without shallow:**
-- Full page reload on every filter change
-- Lose component state
-- Poor performance
-- Jarring UX
+```typescript
+const showLatestArticles = !hasSearchTerm && !hasActiveFacets;
 
-**With shallow:**
-- No page reload
-- Preserve component state
-- Fast updates
-- Smooth UX
+return (
+  <div>
+    <div className={showLatestArticles ? "" : "hidden"}>
+      <div id="portal-target" />  {/* Always in DOM */}
+    </div>
+    <div className={showLatestArticles ? "hidden" : ""}>
+      <SearchResults />            {/* Always in DOM */}
+    </div>
+  </div>
+);
+```
+
+### Why This Matters
+
+Conditional mount/unmount of sections inside a search widget causes:
+- **MutationObserver thrashing** — portals watching for DOM targets fire repeatedly
+- **Widget state loss** — Sitecore Search SDK re-initializes on remount, losing accumulated results, facet selections, and pagination
+- **Fresh API calls every cycle** — each mount triggers a new search request, even when returning to a previously loaded state (e.g., clearing search -> articles reappear with a loading flash)
+
+### Use `hidden` Not `invisible`
+
+- `hidden` (`display:none`) — removes from layout flow, no blank space
+- `invisible` (`visibility:hidden`) — element still takes up space
+- When two sections occupy the same visual slot, use `hidden` so only the active one takes space
+
+### When This Applies
+
+Any time two mutually exclusive sections share a visual slot inside a search widget:
+- Portal targets for nested widgets (e.g., LatestArticles inside ProfessionalsSearch)
+- Default content vs. search results
+- Empty states vs. loaded states that contain widget context
+
+### Detection
+
+```bash
+# Look for conditional rendering of portal targets or result sections
+grep -n "&&.*portal\|&&.*results\|&&.*<div.*id=" file.tsx
+# Should use className with hidden instead
+```
 
 ---
 
@@ -512,16 +731,17 @@ router.push(
 
 Before pushing code, verify:
 
-- [ ] Using `facetValue.id` NOT `facetValue.text` (#1)
-- [ ] All 5 `onFacetClick` parameters present (#2)
-- [ ] URL updates after SDK updates (#3)
+- [ ] Facet property matches encoding type (`.text` for `type: 'text'`, `.id` for `type: 'valueId'`) (#1)
+- [ ] All required `onFacetClick` parameters present (`facetId`, value, `type`, `checked`, `facetIndex`) (#2)
+- [ ] URL updates after SDK updates via `searchUrlManager` (#3)
 - [ ] NO client-side filtering of `content` (#4)
 - [ ] Single `widget()` wrapper per search (#5)
 - [ ] Controlled inputs with form submission (#6)
 - [ ] NO manual pagination resets (#7)
-- [ ] `router.isReady` checked before URL ops (#8)
-- [ ] `onClearFilters` clears all 3 state layers (#9)
-- [ ] Shallow routing used for search URLs (#10)
+- [ ] Using `next/navigation` NOT `next/router`; no `router.isReady` or `router.query` (#8)
+- [ ] `clearAllFilters` clears all 3 state layers (#9)
+- [ ] `{ scroll: false }` on all search URL updates (#10)
+- [ ] NO conditional mount/unmount of widget sections — use CSS `hidden` toggle (#11)
 
 ## Automated Validation
 
@@ -532,16 +752,16 @@ bash scripts/validate-search-code.sh src/components/search/MyWidget.tsx
 
 **Output example:**
 ```
-✓ No facetValue.text usage found
-✓ All onFacetClick calls have 5 parameters
-✓ URL sync after SDK updates
-✓ No client-side filtering of content
-✓ Single widget() wrapper
-✗ WARNING: Uncontrolled input detected (line 45)
-✓ No manual pagination resets
-✓ router.isReady checks present
-✓ Clear filters implementation complete
-✓ Shallow routing enabled
+OK  No mismatched facet property/type
+OK  All onFacetClick calls have required parameters
+OK  URL sync after SDK updates
+OK  No client-side filtering of content
+OK  Single widget() wrapper
+WARN  Uncontrolled input detected (line 45)
+OK  No manual pagination resets
+OK  No Pages Router imports (next/router, router.isReady, router.query)
+OK  Clear filters implementation complete
+OK  scroll: false on router.push calls
 
 Score: 9/10 - Review warnings before deploying
 ```
