@@ -1,0 +1,7 @@
+interface:
+  display_name: "Generate PR Message"
+  short_description: "Draft PR markdown from branch commits"
+  default_prompt: "Use $generate-pr-message to draft a concise markdown PR title and body from the current branch commits."
+
+policy:
+  allow_implicit_invocation: false
